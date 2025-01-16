@@ -1,0 +1,1455 @@
+---
+title: "Pre and post deployment eMRS"
+author: "Agaz Wani"
+editor: visual
+date: 10/17/2022
+format: 
+  html:
+    fig-width: 8
+    fig-height: 4
+    code-fold: false
+---
+
+### Analysis
+
+Looking at the pre and post depolyment samples in MRS, PRISMO and ArmySTARS cohorts to see how eMRS performs. We performed co-variate adjustment of the data as usual, separately for each cohort. We will add the analysis using models 2 (without exposure variables in the model) and updated weights and model 3 with adjusted exposure variables.
+
+```{r}
+#| message: false
+
+library(dplyr)
+library(data.table)
+library(arrow)
+library(openxlsx)
+library(tidyverse)
+library(ggsignif)
+library(corrplot)
+library(cowplot)
+library(grid)
+library(gridExtra)
+library(pROC) 
+library(rms)
+
+```
+
+### Load phenotype and methylation data
+
+```{r}
+# Load phenotype 
+path <- "G:/PGC ML/Pre_Processed Data/2021-11-15_21-41-53/"
+pheno <- read.csv(paste0(path, "Pre_Post_MRS_ArmyS_Prismo_Pheno.csv"))
+
+# Load methylation data
+meth_data <- read_feather(paste0(path, "Pre_Post_ArmyCohorts_Imputed_Covariate_adjusted_Meth_on_mvals.feather"))
+
+meth_data_adj_exps <- read_feather(paste0(path, "Pre_Post_ArmyCohorts_Imputed_Covariate_adjusted_Meth_on_mvals_Adj_Exp_Vars.feather"))
+
+meth_data_adj_exps <- meth_data_adj_exps %>%
+  select(-c("__index_level_0__"))
+
+# set index as rownames
+meth_data <- column_to_rownames(meth_data, var = "Index")
+
+meth_data_adj_exps <- column_to_rownames(meth_data_adj_exps, 
+                                         var = "Index")
+```
+
+### Explore data
+
+```{r}
+# studies
+table(pheno$Study)
+
+# current PTSD
+table(pheno$Ptsdpm)
+
+# Lifetime PTSD
+table(pheno$Ptsdlife)
+
+# combine in a list
+meth_data_ls <- list("methdata" = meth_data,
+                     "meth_adj_exp" = meth_data_adj_exps)
+
+# Methylation data dim
+lapply(meth_data_ls, dim)
+```
+
+### Remove any samples with remitted PTSD. MRS and PRISMO have no lifetime PTSD. So we'll be checking for ArmySTARRS only.
+
+```{r}
+
+# Get remitted samples
+remitted <- pheno %>%
+  filter((Ptsdpm==0 & Ptsdlife==1))
+dim(remitted)
+
+# Remove remitted from the phenotype file
+pheno_wo_rem <- pheno[which(!pheno$Basename %in% remitted$Basename), ]
+dim(pheno_wo_rem)
+
+# Create new id, removing substrings (_1/_2 etc) to group
+pheno_wo_rem <- pheno_wo_rem %>%
+  mutate(EWAS_id_new = gsub("\\_.*", "", Ewas_Id), .before = Ewas_Id)
+View(pheno_wo_rem)
+
+```
+
+### Remove missing entries in childhood trauma, trauma num and PTSD
+
+```{r}
+ 
+rm_mis_cols <- c("Childhood_Mt", "Ptsdpm", "Traumanum")
+pheno_clean <- pheno_wo_rem[complete.cases(pheno_wo_rem[rm_mis_cols]), ]
+
+# create pre post column from visit
+pheno_clean <- pheno_clean %>%
+  mutate(Group = case_when(
+    Visit == '0.0' | Visit == '0' ~ "Pre",
+    TRUE ~ "Post"
+  ), .before = Visit)
+
+dim(pheno_clean)
+View(pheno_clean)
+
+# rename some columns for brevity
+old_cols <- c('Ptsdpm', 'Traumanum', 'Childhood_Mt')
+new_cols <- c('CurrentPTSD', 'TraumaNumber', 'ChildhoodMaltreatment')
+
+# function to rename columns
+pheno_clean <- pheno_clean %>% dplyr::rename_at(vars(old_cols), ~new_cols)
+
+View(pheno_clean)
+
+# Convert some columns to factors
+fac_cols <- c("Gender", "CurrentPTSD", "Group")
+pheno_clean[fac_cols] <- lapply(pheno_clean[fac_cols], factor)
+
+
+```
+
+### Group data on study and id to count the samples for pre and post deployment
+
+```{r}
+# Group and count
+pheno_clean <- pheno_clean %>%
+  group_by(EWAS_id_new, Study) %>%
+  mutate(n = n(), .after = Ewas_Id)
+
+View(pheno_clean)
+
+# Filter to include pairs only
+pheno_pre_post <- pheno_clean %>%
+  filter(n ==2)
+dim(pheno_pre_post)
+
+# PRISMO trauma burden was assessed at only time point 1
+# so those samples were filtered out when considering only trauma exposed at pre and post
+table(pheno_pre_post$Study)
+#write.csv(pheno_pre_post, "/PGC ML/Combined Data/2022-03-30_15-07-11/Pre_Post_pairs_MRS_ArmyS_Prismo.csv", row.names = F)
+
+```
+
+### Split phenotype data into pre and post
+
+```{r}
+# Get pre and post samples in list
+pre_post_ls <- split(pheno_pre_post, pheno_pre_post$Group)
+lapply(pre_post_ls, function(x) table(x$Group))
+
+# Lets check if we have the same ids in pre and post
+table(pre_post_ls$Pre$EWAS_id_new %in% pre_post_ls$Post$EWAS_id_new)
+```
+
+### Lets get the samples that have phenotype information
+
+```{r}
+# Also get only those samples that are in phenotype file
+meth_imp_pre_post <- lapply(meth_data_ls, function(x){
+  x[which(rownames(x) %in% pheno_pre_post$Basename), ]
+}) 
+lapply(meth_imp_pre_post, dim)
+
+# checkf if all are matching
+lapply(meth_imp_pre_post, function(x) table(rownames(x) %in% pheno_pre_post$Basename))
+
+lapply(meth_imp_pre_post, function(x) head(x[, 1:5]))
+
+```
+
+### Lets get pre and post methylation data
+
+```{r}
+# split into a list
+pre_post_meth_ls <- lapply(meth_imp_pre_post, function(x){
+  lapply(pre_post_ls, function(y){
+  x[which(rownames(x) %in% y$Basename), ]
+})
+  
+})
+
+lapply(pre_post_meth_ls, function(x){
+  lapply(x, dim)
+}) 
+
+# Combine methylation and phenotype data
+# map pre methylation with pre pheno 
+# and post methylatiomn with post pheno
+
+# Also add childhood mt and trauma num to calculate risk scores
+
+ct_trm <- c("Basename", "ChildhoodMaltreatment", "TraumaNumber")
+ct_trm
+pre_post_comb <- lapply(pre_post_meth_ls, function(z){
+  Map(function(x, y) merge(x, y[, ct_trm],
+                           by.x = 0,
+                           by.y = 'Basename'),
+      z, 
+      pre_post_ls)
+}) 
+  
+
+lapply(pre_post_comb, function(x) lapply(x, dim))
+View(pre_post_comb$methdata$Post)
+
+# Convert ids to rownames
+pre_post_comb <- lapply(pre_post_comb, function(x){
+  lapply(x, function(y){
+  column_to_rownames(y, var = "Row.names")
+}) 
+})
+lapply(pre_post_comb, function(x) lapply(x, dim))
+
+```
+
+### Scale data (childhood mt and Trauma num)
+
+```{r}
+# Main function to scale data 
+maxmin <- function(x, na.rm=TRUE){
+  if(is.vector(x)==TRUE){
+    maxs <- max(x, na.rm = na.rm)
+    mins <- min(x, na.rm = na.rm)
+    scale(x,center=mins,scale=maxs-mins)
+  } else {
+    maxs <- apply(x, 2,max)
+    mins <- apply(x, 2,min)
+    scale(x, center = mins, scale = maxs - mins)
+  }
+}
+
+
+# Helper function to scale data
+scale_data <- function(df, cols){
+  scale_df <- df[, which(names(df) %in% (cols))]
+  scale_df <- data.frame(maxmin(x = scale_df, na.rm = T))
+  other_df <- df[, -which(names(df) %in% (cols))]
+  x <- cbind(other_df, scale_df)
+}
+
+# Helper function to scale data
+scale_data_helper <- function(df, cols){
+  if(is.list(df)){
+    x <- lapply(df, function(x) scale_data(x, cols))
+    print(lapply(x, dim))
+  }else{
+    x <- scale_data(df, cols)
+    print(dim(x))
+  }
+  x
+}
+
+```
+
+### Scale columns before calculating risk scores
+
+```{r}
+scale_cols <- c("TraumaNumber", "ChildhoodMaltreatment")
+adj_sc_df <- lapply(pre_post_comb, function(x){
+  scale_data_helper(x, scale_cols)
+})
+```
+
+### Load feature weights
+
+```{r}
+# Load weights. We will use the weights from the dataset with non CpG and XY chromosome probes removed 
+
+weights_wd_exp <- read.csv("../../../Combined Data/2022-03-30_15-07-11/Important_features_wo_non_CpGsXY_EN_selected_wd_EN_l1_r_0.1.csv")
+dim(weights_wd_exp)
+
+weights_wo_exp <- read.csv("../../../Combined Data/2022-03-30_15-07-11/Important_features_wo_non_CpGsXY_EN_WO_Exposure_Vars_selected_wd_EN_l1_r_0.1.csv")
+
+weights_wd_adj_exp <- read.csv("../../../Combined Data/2023-03-08_21-41-11/Important_features_wo_non_CpGsXY_Lasso_selected_wd_EN.csv")
+
+weights_wd_exp$Feature <- ifelse(weights_wd_exp$Feature == 'Traumanum', 'TraumaNumber',
+                      ifelse(weights_wd_exp$Feature == 'Childhood_Mt',
+                             'ChildhoodMaltreatment', weights_wd_exp$Feature))
+
+# View(weights_wd_exp)
+
+# combine weights into a list
+weights <- list("weights_wd_exp" = weights_wd_exp,
+                "weights_wo_exp" = weights_wo_exp,
+                "weights_wd_adj_exp" = weights_wd_adj_exp)
+lapply(weights, dim)
+
+```
+
+```{r}
+# current - check order
+# we have 3730 in meth data and 3728 features in wo exp vars weights
+lapply(weights,function(x){
+  lapply(adj_sc_df, function(y) {
+    lapply(y, function(z) table(colnames(z) == x$Feature))
+  }) 
+}) 
+```
+
+### Check features
+
+```{r}
+lapply(weights, dim)
+
+lapply(adj_sc_df$methdata, dim)
+
+lapply(adj_sc_df$meth_adj_exp, dim)
+```
+
+### Calculate Risk Scores
+
+```{r}
+# Calculate risk scores 
+
+calculate_risk_score <- function(weights_ls, df_ls){
+  
+  risk_scores <- lapply(weights_ls, function(y){ # loop over weights
+    risk_scores <- lapply(df_ls, function(x) { # loop over dfs
+      
+      # meth and pheno risk scores
+      comn_vars <- x[, which(colnames(x) %in% y$Feature)]
+    
+      ord <- comn_vars[, order(match(colnames(comn_vars),y$Feature))]
+      
+      # we don't need to run this for df with no exposure variables
+      
+      if("TraumaNumber" %in% y$Feature){
+        print(paste("Ordered: ", 
+                    table(colnames(ord) == y$Feature),
+                    collapse = '\n'))
+        
+        s <- apply(ord, 1, function(x)
+          sum(x * y$Importance, na.rm = TRUE))
+        
+        ord[['risk_score']] <- s
+        ord[['Percentile_risk_score']] <- percent_rank(s)*100
+        }
+    
+    # meth only risk scores
+    meth_fea_weights <- y %>%
+      filter(grepl("^cg|^ch.", Feature))
+    
+    meth <- x[, which(colnames(x) %in% meth_fea_weights$Feature)]
+    
+    ord_meth <- meth[, order(match(colnames(meth),meth_fea_weights$Feature))]
+    print(paste("Ordered: ", table(colnames(ord_meth) == meth_fea_weights$Feature),collapse = '\n'))
+    
+    s_meth <- apply(ord_meth, 1, function(x) sum(x * meth_fea_weights$Importance))
+    ord[['meth_only_risk_score']] <- s_meth
+    
+    ord[['Percentile_meth_risk_score']] <- percent_rank(s_meth)*100
+    ord
+    })
+  })
+  }
+
+# calculate risk scores for with exposure and without exposures
+# i.e Model 1 and 2
+
+risk_scores <- calculate_risk_score(weights_ls = weights[1:2],
+                                    df_ls = adj_sc_df[[1]])
+
+# Risk scores with adjusted exposures variables 
+# i.e Model 3
+risk_scores_adj_exp <- calculate_risk_score(weights_ls = weights[3],
+                                    df_ls = adj_sc_df[[2]])
+
+# combine the risk scores
+risk_scores$weights_wd_adj_exp <- risk_scores_adj_exp$weights_wd_adj_exp
+
+View(risk_scores$weights_wd_exp$Post)
+
+
+# Function to calculate mean
+cpg_p <- c("cg", "ch.") # pattern
+calculate_mean <- function(df, p){
+  if(is.list(df)){
+    df <- lapply(df, function(x) {
+      x %>% mutate(mean_meth = rowMeans(select(., starts_with(cpg_p))))
+      })
+  }else{
+    df <- df %>% mutate(mean_meth = rowMeans(select(., starts_with(cpg_p))))
+  }
+  
+}
+
+risk_scores <- lapply(risk_scores, function(x) 
+  calculate_mean(x, cpg_p))
+
+# Combine risk score with more phenotype information
+risk_scores_wd_pheno <- lapply(risk_scores, function(z){
+  Map(function(x, y) merge(x,y,
+                           by.x = 0,
+                           by.y = "Basename"),
+      z, pre_post_ls)
+})
+
+
+lapply(risk_scores_wd_pheno$weights_wd_exp, dim)
+lapply(risk_scores_wd_pheno$weights_wo_exp, dim)
+lapply(risk_scores_wd_pheno$weights_wd_adj_exp, dim)
+
+# check if all are in order
+lapply(risk_scores_wd_pheno, function(x) {
+  table(x$Post$EWAS_id_new == x$Pre$EWAS_id_new)
+})
+
+
+
+# Combine pre and post
+risk_scores_df_long <- lapply(risk_scores_wd_pheno, function(x){
+  rbind(x$Pre,x$Post)
+})
+  
+
+lapply(risk_scores_df_long, dim)
+
+# sort factor levels
+risk_scores_df_long <- lapply(risk_scores_df_long, function(x){
+  x$Group <- factor(x$Group, levels = c("Pre", "Post"))
+  x
+})
+  
+
+# Get those who developed PTSD post deployment
+developed_ptsd <- lapply(risk_scores_df_long, function(x)
+  x %>%
+    group_by(EWAS_id_new) %>%
+    filter(n_distinct(CurrentPTSD) == 2)
+  )
+
+lapply(developed_ptsd, dim)
+
+
+# Get those who didn't developed PTSD post deployment
+not_developed_ptsd <- lapply(risk_scores_df_long, function(x)
+  x %>%
+    group_by(EWAS_id_new) %>%
+    filter(n_distinct(CurrentPTSD) == 1) %>%
+    mutate(n = n()) %>%
+    filter(n == 2)
+)
+
+lapply(not_developed_ptsd, dim)
+```
+
+### Plot theme
+
+```{r}
+ 
+# theme setting
+th <-   theme(plot.title = element_text(size = 17, hjust = 0.5),
+              axis.title = element_text(size =15),
+              axis.text = element_text(size = 13),
+              legend.title = element_text( size = 15),
+              legend.text = element_text(size = 13))
+```
+
+### Linear model and plot
+
+```{r}
+
+# function to plot with lm line
+lm_plot <- function(df, x, y, xlab, ylab, title, group='CurrentPTSD',
+                    model = 'full', legend='', fig_legend = TRUE){
+  if (model == 'full'){
+    p <- ggplot(df,aes_string(x, y)) +
+      geom_point( color="blue", size = 3) +
+      geom_smooth(method='lm', linetype="dashed",
+                  color="darkred", fill="blue", size = 1.5)
+  }else{
+    p <- ggplot(df,aes_string(x, y, color = group)) +
+      geom_point( size = 3) 
+    
+    if(fig_legend){
+      print("=================")
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+    }else{
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        theme(legend.position = 'none')+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+      
+    }
+
+
+  }
+
+  p <- p + ggtitle(title)+
+    xlab(xlab) +
+    ylab(ylab) +
+    theme_classic()+
+    th
+  
+  if(!fig_legend){
+    p <- p + theme(legend.position = 'none')
+  }else p
+}
+```
+
+### Density Plot
+
+```{r}
+ 
+# Density plot function
+make_densityplot <- function(df, x, y, xlab, ylab, fig_legend = TRUE,
+                             title = '', legend = '', facet = FALSE){
+  
+  p <- ggplot(data=df, aes_string(x=x, group=y, fill=y)) +
+    geom_density(adjust=1.5, alpha=.8) +
+    xlim(min(df[[x]]), max(df[[x]])) +
+    theme_classic()
+  
+  if(facet != FALSE){
+    print('Adding facet')
+    p <- p + facet_wrap(as.formula(paste("~", facet)))+
+      theme(strip.text.x = element_text(size = 16))
+  }
+    
+  
+  if(fig_legend){
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF"))
+  }else{
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF")) +
+      theme(legend.position = 'none')
+  }
+
+  p <- p + ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)+ th
+}
+
+
+```
+
+### Exposure and methylation risk scores
+
+```{r}
+# Function call for pre deployment, risk scores Vs. PTSD
+p1_sc_d <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_exp$Pre, 
+  x ='risk_score',
+  y = 'CurrentPTSD',
+  xlab = 'eMRS',
+  ylab = "Density",
+  fig_legend = FALSE,
+  # legend = "Current PTSD",
+  title = "Pre deployment")
+# p1_sc_d
+
+# Function call for post deployment, risk scores Vs. PTSD
+p1_sc_d1 <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_exp$Post, 
+  x = 'risk_score',
+  y = 'CurrentPTSD',
+  xlab = 'eMRS',
+  ylab = "",
+  legend = "PTSD",
+  title = "Post deployment")
+
+cowplot::plot_grid(p1_sc_d, p1_sc_d1, 
+                   rel_widths = c(1.5, 2),
+                   labels = 'AUTO')
+
+```
+
+### Now lets look at the risk scores of those who did and didn't developed PTSD in pre and post separately. For pre we will be using post ptsd to see who did and didn't develope PTSD. Pre - no/yes and Post- no/yes
+
+```{r}
+#| echo: false
+
+# Lets add post deployment ptsd info to pre data, so that we can see who developed PTSD
+
+# first check if pre and post are in order
+lapply(risk_scores_wd_pheno, function(x) {
+  table(x$Post$EWAS_id_new == x$Pre$EWAS_id_new)
+})
+
+# add who developed ptsd post deployment to pre df for plotting
+risk_scores_wd_pheno$weights_wd_exp$Pre <-
+  risk_scores_wd_pheno$weights_wd_exp$Pre %>%
+  mutate(Dev_PTSD =
+           risk_scores_wd_pheno$weights_wd_exp$Post$CurrentPTSD)
+
+# without exp vars
+risk_scores_wd_pheno$weights_wo_exp$Pre <-
+  risk_scores_wd_pheno$weights_wo_exp$Pre %>%
+  mutate(Dev_PTSD =
+           risk_scores_wd_pheno$weights_wo_exp$Post$CurrentPTSD)
+
+# without exp vars
+risk_scores_wd_pheno$weights_wd_adj_exp$Pre <-
+  risk_scores_wd_pheno$weights_wd_adj_exp$Pre %>%
+  mutate(Dev_PTSD =
+           risk_scores_wd_pheno$weights_wd_adj_exp$Post$CurrentPTSD)
+
+pre_p <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_exp$Pre, 
+  x ='risk_score',
+  y = 'Dev_PTSD',
+  xlab = '',
+  ylab = "Density",
+  fig_legend = FALSE,
+  legend = "PTSD",
+  title = "Pre deployment")
+# pre_p
+
+post_p <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_exp$Post, 
+  x ='risk_score',
+  y = 'CurrentPTSD',
+  xlab = '',
+  ylab = "",
+  fig_legend = TRUE,
+  legend = "Developed \nPTSD",
+  title = "Post deployment")
+# post_p
+
+den_plot <- cowplot::plot_grid(pre_p, post_p, 
+                   rel_widths = c(1.3, 2),
+                   labels = 'A')
+
+x.grob <- textGrob("eMRS",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+title.grob <- textGrob("Distribution of risk scores",
+                   gp=gpar(fontsize=20))
+
+den_plot <- grid.arrange(arrangeGrob(den_plot, 
+                                     bottom = x.grob,
+                                     top = title.grob))
+
+
+```
+
+### Methylation only risk scores. We needed to update the weights, shown below
+
+```{r}
+# pre_p_meth <- make_densityplot(
+#   df = risk_scores_wd_pheno$weights_wd_exp$Pre, 
+#   x ='meth_only_risk_score',
+#   y = 'Dev_PTSD',
+#   xlab = '',
+#   ylab = "Density",
+#   fig_legend = FALSE,
+#   legend = "PTSD",
+#   title = "Pre deployment")
+# # pre_p
+# 
+# post_p_meth <- make_densityplot(
+#   df = risk_scores_wd_pheno$weights_wd_exp$Post, 
+#   x ='meth_only_risk_score',
+#   y = 'CurrentPTSD',
+#   xlab = '',
+#   ylab = "",
+#   fig_legend = TRUE,
+#   legend = "Developed \nPTSD",
+#   title = "Post deployment")
+# # post_p
+# 
+# p_meth_only <- plot_grid(pre_p_meth, post_p_meth, 
+#                    rel_widths = c(1.3, 2),
+#                    labels = 'A')
+# 
+# x.grob <- textGrob("MoRS",
+#                    gp=gpar(fontsize=18), vjust = -1)
+# 
+# p_meth_only <- grid.arrange(arrangeGrob(p_meth_only, 
+#                                         top = title.grob
+#                                         bottom = x.grob))
+```
+
+### Without exposure variables in the model
+
+```{r}
+pre_p_meth_wo_exp <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wo_exp$Pre, 
+  x ='meth_only_risk_score',
+  y = 'Dev_PTSD',
+  xlab = '',
+  ylab = "Density",
+  fig_legend = FALSE,
+  legend = "PTSD",
+  title = "Pre deployment")
+# pre_p
+
+post_p_meth_wo_exp <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wo_exp$Post, 
+  x ='meth_only_risk_score',
+  y = 'CurrentPTSD',
+  xlab = '',
+  ylab = "",
+  fig_legend = TRUE,
+  legend = "Developed \nPTSD",
+  title = "Post deployment")
+# post_p
+
+p_meth_only_wo_exp <- plot_grid(pre_p_meth_wo_exp, 
+                                post_p_meth_wo_exp, 
+                                rel_widths = c(1.3, 2),
+                                labels = 'A')
+
+x.grob <- textGrob("MoRS",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+p_meth_only_wo_exp <- grid.arrange(arrangeGrob(p_meth_only_wo_exp, 
+                                               bottom = x.grob, 
+                                               top = title.grob))
+```
+
+### With adjusted exposure variables in the model
+
+```{r}
+pre_p_meth_wd_adj_exp <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_adj_exp$Pre, 
+  x ='meth_only_risk_score',
+  y = 'Dev_PTSD',
+  xlab = '',
+  ylab = "Density",
+  fig_legend = FALSE,
+  legend = "PTSD",
+  title = "Pre deployment")
+# pre_p
+
+post_p_meth_wd_adj_exp <- make_densityplot(
+  df = risk_scores_wd_pheno$weights_wd_adj_exp$Post, 
+  x ='meth_only_risk_score',
+  y = 'CurrentPTSD',
+  xlab = '',
+  ylab = "",
+  fig_legend = TRUE,
+  legend = "Developed \nPTSD",
+  title = "Post deployment")
+# post_p
+
+p_meth_only_wd_adj_exp <- plot_grid(pre_p_meth_wd_adj_exp, 
+                                post_p_meth_wd_adj_exp, 
+                                rel_widths = c(1.3, 2),
+                                labels = 'A')
+
+x.grob <- textGrob("MoRSAE",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+p_meth_only_wd_adj_exp <- grid.arrange(arrangeGrob(p_meth_only_wd_adj_exp, 
+                                                   bottom = x.grob, 
+                                                   top = title.grob))
+```
+
+### Percentile risk score
+
+```{r}
+# cowplot::plot_grid(p1_sc_d, p1_sc_d1, 
+#                    rel_widths = c(1.5, 2),
+#                    labels = 'AUTO')
+```
+
+### Box Plot
+
+```{r}
+
+# Function to make box plot 
+make_boxplot <- function(df, x, y, xlab, ylab,
+                         test_pval, y_pos, title = FALSE, 
+                         fill){
+  p <- df %>%
+    ggplot(aes_string(x = x, y = y, fill = fill)) +
+    geom_boxplot(lwd = 1) +
+    scale_fill_manual(values = c("#0072B5FF", "#BC3C29FF")) +
+    geom_jitter(size=1.7, alpha=0.9) +
+    theme_classic()+
+    theme(legend.position="none") + th 
+  
+  if (title != FALSE){
+    p <- p + ggtitle(title) }
+  
+  p <- p + xlab(xlab) +
+    ylab(ylab)
+
+  # add significance
+  p + geom_signif(
+    annotation = formatC(test_pval, digits = 2),
+    y_position = y_pos , xmin = 1, xmax = 2, size = 1,
+    textsize = 5, tip_length = c(0.15, 0.02))
+}
+
+```
+
+### Methylation and exposure risk score difference between cases and controls
+
+```{r}
+# Perform wilcox test, risk scores Vs. pre/post
+
+pre <- wilcox.test(risk_score ~ Dev_PTSD,
+                   data = risk_scores_wd_pheno$weights_wd_exp$Pre)
+pre
+pre$p.value
+
+# Perform wilcox test, risk scores Vs. pre/post who deloped PTSD
+post <- wilcox.test(risk_score ~ CurrentPTSD,
+                    data = risk_scores_wd_pheno$weights_wd_exp$Post)
+post
+post$p.value
+
+# Function call for pre post together
+plot_pre <- make_boxplot(
+  df = risk_scores_wd_pheno$weights_wd_exp$Pre,
+  x = 'Dev_PTSD',
+  y = 'risk_score',
+  fill = 'Dev_PTSD',
+  xlab = '',
+  ylab = 'eMRS',
+  test_pval = pre$p.value,
+  y_pos = 3.3
+)
+
+# Function call for pre post who developed PTSD
+plot_post <- make_boxplot(df = risk_scores_wd_pheno$weights_wd_exp$Post,
+                          x = 'CurrentPTSD',
+                          y = 'risk_score',
+                          fill = 'CurrentPTSD',
+                          xlab = '',
+                          ylab = '',
+                          test_pval = post$p.value,
+                          y_pos = 4.5
+                        )
+
+
+plot_pre_post <-  plot_grid(plot_pre, plot_post, nrow = 1,
+                            labels = 'B')
+
+x.grob <- textGrob("Developed PTSD",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+# add title to box plots
+title.grob <- textGrob("Difference in risk scores",
+                   gp=gpar(fontsize=20), vjust = .5)
+
+plot_pre_post <- grid.arrange(arrangeGrob(plot_pre_post, 
+                                          top = title.grob,
+                                          bottom = x.grob))
+```
+
+```{r, fig.height=6, fig.width=7}
+#| fig-height: 6
+#| fig-width: 7
+
+plot_grid(den_plot, 
+          plot_pre_post,
+          nrow = 2)
+```
+
+### Box plot for methylation only risk scores
+
+```{r}
+# pre_meth <- wilcox.test(meth_only_risk_score ~ Dev_PTSD,
+#                         data = risk_scores_wd_pheno$weights_wd_exp$Pre)
+# pre_meth
+# pre_meth$p.value
+# 
+# # Perform wilcox test, risk scores Vs. pre/post who deloped PTSD
+# post_meth <- wilcox.test(meth_only_risk_score ~ CurrentPTSD,
+#                          data = risk_scores_wd_pheno$weights_wd_exp$Post)
+# post_meth
+# post_meth$p.value
+# 
+# # Function call for pre post together
+# plot_pre <- make_boxplot(
+#   df = risk_scores_wd_pheno$weights_wd_exp$Pre,
+#   x = 'Dev_PTSD',
+#   y = 'meth_only_risk_score',
+#   fill = 'Dev_PTSD',
+#   xlab = '',
+#   ylab = 'MoRS',
+#   test_pval = pre_meth$p.value,
+#   y_pos = 1.9
+# )
+# 
+# # Function call for pre post who developed PTSD
+# plot_post <- make_boxplot(
+#   df = risk_scores_wd_pheno$weights_wd_exp$Post,
+#   x = 'CurrentPTSD',
+#   y = 'meth_only_risk_score',
+#   fill = 'CurrentPTSD',
+#   xlab = '',
+#   ylab = '',
+#   test_pval = post_meth$p.value,
+#   y_pos = 2.9
+# )
+# 
+# 
+# plot_pre_post_meth <-  plot_grid(plot_pre, plot_post,
+#                                  nrow = 1, labels = 'B',
+#                                  vjust = .5)
+# 
+# x.grob <- textGrob("Developed PTSD",
+#                    gp=gpar(fontsize=18), vjust = -1)
+# 
+# 
+# plot_pre_post_meth <- grid.arrange(arrangeGrob(plot_pre_post_meth,
+#                                                top = title.grob,
+#                                                bottom = x.grob))
+```
+
+```{r, fig.height=6.5, fig.width=7}
+#| fig-height: 6.5
+#| fig-width: 7
+# 
+# plot_grid(p_meth_only, 
+#           plot_pre_post_meth,
+#           nrow = 2)
+```
+
+### Without exposure variables in the model
+
+```{r}
+pre_meth_wo_exp <- wilcox.test(meth_only_risk_score ~ Dev_PTSD,
+                        data = risk_scores_wd_pheno$weights_wo_exp$Pre)
+pre_meth_wo_exp
+pre_meth_wo_exp$p.value
+
+# Perform wilcox test, risk scores Vs. pre/post who deloped PTSD
+post_meth_wo_exp <- wilcox.test(meth_only_risk_score ~ CurrentPTSD,
+                         data = risk_scores_wd_pheno$weights_wo_exp$Post)
+post_meth_wo_exp
+post_meth_wo_exp$p.value
+
+# Function call for pre post together
+plot_pre_wo_exp <- make_boxplot(
+  df = risk_scores_wd_pheno$weights_wo_exp$Pre,
+  x = 'Dev_PTSD',
+  y = 'meth_only_risk_score',
+  fill = 'Dev_PTSD',
+  xlab = '',
+  ylab = 'MoRS',
+  test_pval = pre_meth_wo_exp$p.value,
+  y_pos = 2.5
+)
+
+# Function call for pre post who developed PTSD
+plot_post_wo_exp <- make_boxplot(
+  df = risk_scores_wd_pheno$weights_wo_exp$Post,
+  x = 'CurrentPTSD',
+  y = 'meth_only_risk_score',
+  fill = 'CurrentPTSD',
+  xlab = '',
+  ylab = '',
+  test_pval = post_meth_wo_exp$p.value,
+  y_pos = 3
+)
+
+
+plot_pre_post_meth_wo_exp <-  plot_grid(plot_pre_wo_exp,
+                                        plot_post_wo_exp, 
+                                        nrow = 1,
+                                        labels = 'B',
+                                        vjust = .5)
+
+x.grob <- textGrob("Developed PTSD",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+plot_pre_post_meth_wo_exp <- grid.arrange(arrangeGrob(plot_pre_post_meth_wo_exp,
+                                                      top = title.grob,
+                                                      bottom = x.grob))
+```
+
+```{r, fig.height=6.5, fig.width=7}
+#| fig-height: 6.5
+#| fig-width: 7
+
+plot_grid(p_meth_only_wo_exp, 
+          plot_pre_post_meth_wo_exp,
+          nrow = 2)
+```
+
+### With adjusted exposure variables in the model
+
+```{r}
+pre_meth_wd_adj_exp <- wilcox.test(meth_only_risk_score ~ Dev_PTSD,
+                        data = risk_scores_wd_pheno$weights_wd_adj_exp$Pre)
+pre_meth_wd_adj_exp
+pre_meth_wd_adj_exp$p.value
+
+# Perform wilcox test, risk scores Vs. pre/post who deloped PTSD
+post_meth_wd_adj_exp <- wilcox.test(meth_only_risk_score ~ CurrentPTSD,
+                         data = risk_scores_wd_pheno$weights_wd_adj_exp$Post)
+post_meth_wd_adj_exp
+post_meth_wd_adj_exp$p.value
+
+# Function call for pre post together
+plot_pre_wd_adj_exp <- make_boxplot(
+  df = risk_scores_wd_pheno$weights_wd_adj_exp$Pre,
+  x = 'Dev_PTSD',
+  y = 'meth_only_risk_score',
+  fill = 'Dev_PTSD',
+  xlab = '',
+  ylab = 'MoRSAE',
+  test_pval = pre_meth_wd_adj_exp$p.value,
+  y_pos = 2.5
+)
+
+# Function call for pre post who developed PTSD
+plot_post_wd_adj_exp <- make_boxplot(
+  df = risk_scores_wd_pheno$weights_wd_adj_exp$Post,
+  x = 'CurrentPTSD',
+  y = 'meth_only_risk_score',
+  fill = 'CurrentPTSD',
+  xlab = '',
+  ylab = '',
+  test_pval = post_meth_wd_adj_exp$p.value,
+  y_pos = 3
+)
+
+
+plot_pre_post_meth_wd_adj_exp <-  plot_grid(plot_pre_wd_adj_exp,
+                                        plot_post_wd_adj_exp, 
+                                        nrow = 1, labels = 'B',
+                                        vjust = .5)
+
+x.grob <- textGrob("Developed PTSD",
+                   gp=gpar(fontsize=18), vjust = -1)
+
+plot_pre_post_meth_wd_adj_exp <- grid.arrange(arrangeGrob(plot_pre_post_meth_wd_adj_exp,
+                                                          top = title.grob,
+                                                          bottom = x.grob))
+```
+
+```{r, fig.height=6.5, fig.width=7}
+#| fig-height: 6.5
+#| fig-width: 7
+
+plot_grid(p_meth_only_wd_adj_exp, 
+          plot_pre_post_meth_wd_adj_exp,
+          nrow = 2)
+```
+
+### Linear model old
+
+```{r}
+# sink("G:/PGC ML/Combined Data/2022-03-30_15-07-11/Linear model PTSD summary_coeff_as_weights_selected_wd_EN_lr_0.1.txt")
+
+lm_helper <- function(df, f){
+  print("=====================================================")
+  analy <- paste(c(
+    paste(c("Data frame", deparse(substitute(df))), collapse = ':'),
+    paste(c("Formula", f), collapse = ':')), collapse = ', ')
+  print(analy)
+  if(is.list(df) & length(df) < 5){# is.list is true for single df 
+    n <- names(df)
+    print(f)
+    lmr <- lapply(seq_along(df), function(i){
+      x <- lm(f, data = df[[i]])
+      print(n[i])
+      print(summary(x))
+      x
+    }) 
+  }else{
+    print(f)
+    lmr <- lm(f, data = df)
+     print(summary(lmr))
+    lmr
+  }
+}
+
+# PTSD formula
+f_cur_ptsd <- as.formula(paste('risk_score~', 'CurrentPTSD'))
+
+f_cur_ptsd_meth <- as.formula(paste('meth_only_risk_score~', 'CurrentPTSD'))
+
+# PTSS formula
+f_ptss <- as.formula(paste('risk_score~', 'Pts_Severity'))
+
+# current PTSD
+# lmr_adj <- lm_helper(df = adj_df, f = f_cur_ptsd)
+
+lmr_pre_post <- lm_helper(df = risk_scores_wd_pheno$weights_wd_exp$Post, f = f_cur_ptsd)
+
+lmr_pre_post_ptsd <- lm_helper(df = developed_ptsd$weights_wd_exp, f = f_cur_ptsd)
+
+# without exp in the model
+lmr_pre_post_wo_exp <- lm_helper(df = risk_scores_wd_pheno$weights_wo_exp$Post, 
+                                 f = f_cur_ptsd_meth)
+
+lmr_pre_post_ptsd_wo_exp <- lm_helper(df = developed_ptsd$weights_wo_exp, 
+                                      f = f_cur_ptsd_meth)
+```
+
+### Check if risk scores from pre predict PTSD at post
+
+```{r}
+ 
+# Combine required columns from pre, post
+pre_post_sub <- lapply(risk_scores_wd_pheno$weights_wd_exp, function(x){
+  x %>%
+  select(EWAS_id_new, risk_score, meth_only_risk_score,
+         mean_meth, CurrentPTSD)
+})
+
+
+lapply(pre_post_sub, head)
+
+# Check if all are matching
+table(pre_post_sub$Pre$EWAS_id_new == pre_post_sub$Post$EWAS_id_new)
+
+pre_post_sub_comb <- do.call(cbind, pre_post_sub)
+
+
+# predict pre deployment risk scores using post deployment PTSD
+lmr_pred_pre_rs <- lm(Pre.risk_score ~ Post.CurrentPTSD, 
+                      data = pre_post_sub_comb )
+summary(lmr_pred_pre_rs)
+
+
+# predict post risk scores using post deployment PTSD
+lmr_pred_post_rs <- lm(Post.risk_score ~ Post.CurrentPTSD,
+                       data = pre_post_sub_comb)
+summary(lmr_pred_post_rs)
+
+
+# predict post risk scores using pre deployment risk scores
+lmr_pred_post_wd_pre_rs <- lm(Post.risk_score ~ Pre.risk_score,
+                              data = pre_post_sub_comb)
+summary(lmr_pred_post_wd_pre_rs)
+
+# predict post PTSD using pre deployment risk scores
+lmr_pred_post_ptsd_wd_pre_rs <- lm(as.numeric(Post.CurrentPTSD) ~ Pre.risk_score, 
+                                   data = pre_post_sub_comb)
+summary(lmr_pred_post_ptsd_wd_pre_rs)
+
+
+# predict post PTSD using pre deployment methylation only risk scores
+lmr_pred_post_ptsd_wd_pre_meth_rs <- lm(as.numeric(Post.CurrentPTSD) ~ Pre.meth_only_risk_score, data = pre_post_sub_comb)
+summary(lmr_pred_post_ptsd_wd_pre_meth_rs)
+```
+
+### Lets use logistic model to predict post deployment PTSD using pre deployment eMRS and MRS from model 1
+
+```{r}
+# exposure and methylation risk scores
+Postptsd_vs_pre_rs_model <- glm(Post.CurrentPTSD ~ Pre.risk_score, 
+               data = pre_post_sub_comb, family = "binomial")
+summary(Postptsd_vs_pre_rs_model)
+
+# using rms package to get pseud rsquared
+message("Pseudo RSquared ...................")
+print(lrm(Post.CurrentPTSD ~ Pre.risk_score, 
+               data = pre_post_sub_comb))
+
+rs_predicted <- predict(Postptsd_vs_pre_rs_model, pre_post_sub_comb, type="response")
+
+auc(pre_post_sub_comb$Post.CurrentPTSD, rs_predicted)
+
+
+# methylation risk scores
+Postptsd_vs_pre_mrs_model <- glm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb, family = "binomial")
+summary(Postptsd_vs_pre_mrs_model)
+
+
+message("Pseudo RSquared ...................")
+print(lrm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb))
+
+mrs_predicted <- predict(Postptsd_vs_pre_mrs_model, pre_post_sub_comb, type="response")
+
+auc(pre_post_sub_comb$Post.CurrentPTSD, mrs_predicted)
+
+# model 1 emrs vs model 1 mrs
+# we do this test to see if there is a significant differene 
+# between two models
+anv_tst <- anova(Postptsd_vs_pre_rs_model, 
+                 Postptsd_vs_pre_mrs_model,
+                 test="Chisq")
+anv_tst
+```
+
+### Logistic model for MRS from model 2 (same features but updated weights)
+
+```{r}
+# Combine required columns from pre, post
+pre_post_sub_model2 <- lapply(risk_scores_wd_pheno$weights_wo_exp, function(x){
+  x %>%
+  select(EWAS_id_new, meth_only_risk_score,
+         mean_meth, CurrentPTSD)
+})
+
+
+lapply(pre_post_sub_model2, head)
+
+# Check if all are matching
+table(pre_post_sub_model2$Pre$EWAS_id_new == pre_post_sub_model2$Post$EWAS_id_new)
+
+pre_post_sub_comb_model2 <- do.call(cbind, pre_post_sub_model2)
+
+# model 
+# exposure and methylation risk scores
+Postptsd_vs_pre_rs_model2 <- glm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb_model2, 
+               family = "binomial")
+summary(Postptsd_vs_pre_rs_model2)
+
+message("Pseudo RSquared ...................")
+print(lrm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb_model2))
+
+# model 1 emrs vs model 2 mrs
+anv_tst_1_vs_2 <- anova(Postptsd_vs_pre_rs_model, 
+                 Postptsd_vs_pre_rs_model2,
+                 test="Chisq")
+anv_tst_1_vs_2
+
+```
+
+### Logistic model for MRS from model 3 (adjusted exposure variables
+
+```{r}
+# Combine required columns from pre, post
+pre_post_sub_model3 <- lapply(risk_scores_wd_pheno$weights_wd_adj_exp, function(x){
+  x %>%
+  select(EWAS_id_new, meth_only_risk_score,
+         mean_meth, CurrentPTSD)
+})
+
+
+lapply(pre_post_sub_model3, head)
+
+# Check if all are matching
+table(pre_post_sub_model3$Pre$EWAS_id_new == pre_post_sub_model3$Post$EWAS_id_new)
+
+pre_post_sub_comb_model3 <- do.call(cbind, pre_post_sub_model3)
+
+# model 
+# exposure and methylation risk scores
+Postptsd_vs_pre_rs_model3 <- glm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb_model3, 
+               family = "binomial")
+summary(Postptsd_vs_pre_rs_model3)
+
+message("Pseudo RSquared ...................")
+print(lrm(Post.CurrentPTSD ~ Pre.meth_only_risk_score, 
+               data = pre_post_sub_comb_model3))
+
+
+```
+
+\
+\
+
+```{r}
+#| fig-width: 5
+ # lm with pre and post risk scores
+lm_pre_post_rs <- lm_plot(df = pre_post_sub_comb, 
+                          x = 'Pre.risk_score',
+                          y = 'Post.risk_score',
+                          xlab = "Pre risk score",
+                          ylab  = "Post risk score",
+                          model = 'seperate',
+                          group = "Post.CurrentPTSD",
+                          fig_legend = TRUE,
+                          legend = 'PTSD',
+                          title = "Relationship between \nPre and Post risk scores")
+
+lm_pre_post_rs
+```
+
+### Line Plot
+
+```{r}
+#| fig-width: 5
+
+line_plot <- function(df, x, y, group, color,
+                      legend, title = NULL, 
+                      xlab = NULL, ylab = NULL,
+                      fig_legend = TRUE){
+  p <- df %>%
+  ggplot( aes_string(x=x, y=y, group=group,
+              color = color)) + 
+  geom_line(size =1) 
+  
+  p <- p +  scale_color_manual("PTSD", values = 
+                               c("0" = "#0072B5FF", 
+                                "1" = "#BC3C29FF")) 
+  
+  p <- p + ggtitle(title)+
+    xlab(xlab) +
+    ylab(ylab) +
+    theme_classic()+
+    th
+  
+  if(!fig_legend){
+    p <- p + theme(legend.position = 'none')
+  }else p
+}
+
+line_plot(df = pre_post_sub_comb,
+          x = "Pre.risk_score",
+          y = "Post.risk_score",
+          group = "Post.CurrentPTSD",
+          color = "Post.CurrentPTSD",
+          legend = "Post PTSD",
+          title = "Pre Vs Post deployment risk scores",
+          xlab = "Pre risk score",
+          ylab = "Post risk score"
+          )
+```
+
+### Correlation plot
+
+```{r}
+get_correlation <- function(df, cols, new_names){
+  df <- ungroup(df)
+  df <- df %>% select(cols)
+  indx <- sapply(df, is.factor)
+  df[indx] <- lapply(df[indx], function(x) as.numeric(as.character(x)))
+  colnames(df) <- new_names
+  cor_df <- cor(df)
+  p = cor.mtest(df, conf.level = 0.95)
+
+  # adjusted pvalues
+  p_adj <- matrix(p.adjust(as.vector(as.matrix(p$p)),
+                           method='fdr'),
+                  ncol=ncol(cor_df))
+  rownames(p_adj) <- new_names
+  colnames(p_adj) <- new_names
+
+  df_ls <- list(cor_df, p_adj)
+  names(df_ls) <- c("cor", "padj")
+  return(df_ls)
+}
+
+get_correlation_helper <- function(df, cols, new_names){
+  if (is.list(df)) {
+    print("Processing list ...")
+    x_cor <- lapply(df, function(x) get_correlation(x, cols, new_names))
+  }else{
+    x_cor <- get_correlation(df, cols, new_names)
+  }
+  x_cor
+}
+
+# color palette
+colrs <- colorRampPalette(c("#0072B5FF", '#7F0000',
+                            '#FF7F00', 'orange',
+                            'cyan', '#007FFF', 'blue', '#00007F',
+                            "#BC3C29FF"))
+```
+
+```{r}
+
+cols <- c("TraumaNumber.x", "ChildhoodMaltreatment.x", "risk_score",
+          "CurrentPTSD", "mean_meth")
+
+new_names <- c("Cumulative trauma", "Childhood maltreatment", 
+               "Risk score", "Current PTSD", "Mean methylation")
+
+# risk scores of pre post
+cor_dfs <- get_correlation(df = risk_scores_df_long$weights_wd_exp ,
+                                  cols = cols,
+                                  new_names = new_names)
+ 
+print(names(cor_dfs))
+
+# risk scores of those who didn't developed ptsd 
+cor_dfs_noptsd <-  get_correlation(df = not_developed_ptsd$weights_wd_exp,
+                                  cols = cols,
+                                  new_names = new_names)
+
+# risk scores of those who developed ptsd between pre and post
+cor_dfs_ptsd <-  get_correlation(df = developed_ptsd$weights_wd_exp,
+                                  cols = cols,
+                                  new_names = new_names)
+
+# risk scores of pre deployment
+cor_dfs_pre <-  get_correlation(df = risk_scores_wd_pheno$weights_wd_exp$Pre,
+                                cols = cols,
+                                new_names = new_names)
+
+# risk scores of post deployment
+cor_dfs_post <-  get_correlation(df = risk_scores_wd_pheno$weights_wd_exp$Post,
+                                cols = cols,
+                                new_names = new_names)
+```
+
+### Plots
+
+```{r}
+
+# Function to get correlation between different variables
+correlation_plot <- function(cor_df, title){
+  corrplot(cor_df$cor,
+  p.mat = cor_df$padj,
+  diag = TRUE, method = "pie",
+  type = "upper",  number.cex = 0.8,
+  tl.col = "black", tl.srt = 45,
+  tl.cex = 1.4, cl.cex = 1.4,
+  sig.level = c(0.001, 0.01, 0.05),
+  pch.cex = 1.4,insig = 'label_sig',
+  cl.ratio = 0.4,
+  mar = c(0,0,2,0),
+  col = colrs(10),
+  title = title)
+  recordPlot()
+}
+
+```
+
+### Function call for correlation plots
+
+```{r}
+#| fig-width: 7
+#| fig-height: 4.5
+
+p_adj <- correlation_plot(cor_dfs, title = 'All from pre and post')
+
+p_adj_noptsd <- correlation_plot(cor_dfs_noptsd, title = "Didn't develope PTSD")
+
+p_adj_ptsd <- correlation_plot(cor_dfs_ptsd, title = 'Developed PTSD')
+
+```
+
+### Pre and post deployment plots
+
+```{r}
+#| fig-width: 7
+#| fig-height: 4.5
+cor_dfs_pre <- correlation_plot(cor_dfs_pre, 
+                                title = 'Pre deployment')
+
+cor_dfs_post <-  correlation_plot(cor_dfs_post, 
+                              title = 'Post deployment')
+
+# cowplot::plot_grid(
+#   correlation_plot(cor_dfs_pre, 
+#                               title = 'Pre deployment'),
+#   correlation_plot(cor_dfs_post, 
+#                               title = 'Post deployment')
+# )
+
+
+```

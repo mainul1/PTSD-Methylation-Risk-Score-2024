@@ -1,0 +1,642 @@
+---
+title: "Enrichment_Analysis"
+format: html
+editor: visual
+date: "3/5/2023, Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+---
+
+```{r}
+library(missMethyl)
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+library(data.table)
+library(dplyr)
+library(openxlsx)
+library(ggplot2)
+library(forcats)
+```
+
+### Load data for pathway analysis
+
+```{r}
+model3 <- local(get(load("../../../Combined Data/2023-03-08_21-41-11/Adj_sc_df_for_pathways.RData")))
+names(model3)
+
+model3_weights <- local(get(load("../../../Combined Data/2023-03-08_21-41-11//weights_for_pathways.RData")))
+
+
+
+# model 1 & 2
+load("../../../Combined Data/2022-03-30_15-07-11/Adj_sc_df_for_pathways.RData")
+names(adj_sc_df)
+
+load("../../../Combined Data/2022-03-30_15-07-11/weights_for_pathways.RData")
+
+# combine data from models 1, 2 and 3
+adj_sc_df$`Without NonCpGXY ProbesWdAdjExp` <- model3$`Without NonCpGXY Probes`
+
+# keep only noncpgXY probes removed dataset
+adj_sc_df <- adj_sc_df[2:4]
+names(adj_sc_df)
+
+```
+
+### Get gene annotations
+
+```{r}
+annot_file <- fread("D:/EWAS meta-analysis(Janelle)/data/infinium-methylationepic-v-1-0-b5-manifest-file.csv", 
+                    data.table = F, skip = 7, fill = T)
+
+dim(annot_file)
+
+annot_file_sub <- annot_file %>% dplyr::select(IlmnID, Infinium_Design_Type,
+                                               Genome_Build, CHR, MAPINFO,
+                                               UCSC_RefGene_Name, UCSC_RefGene_Group, 
+                                               Relation_to_UCSC_CpG_Island)
+
+# Importance to percent
+imp_cpgs_annot <- lapply(weights, function(x){
+  # x$Importance <- x$Importance*100
+  y <- merge(x, annot_file_sub, by = 1, all.x = T)
+  y[order(y$Importance, decreasing = T), ]
+  # annot_file[which(annot_file$IlmnID %in% x$Feature), ]
+})
+
+lapply(imp_cpgs_annot, dim)
+lapply(imp_cpgs_annot, head)
+View(imp_cpgs_annot$weights_wd_exp)
+
+```
+
+### Gene annotations
+
+```{r}
+# neg_anno <- lapply(list, function)
+
+```
+
+### Pathway analysis
+
+```{r}
+# get cpgs
+get_pathways <- function(df, Go=TRUE, kegg= NULL, 
+                         fract_counts = TRUE){
+  
+  probes <- df %>%
+    select(starts_with(c('cg','ch.')))
+  dim(probes)
+  
+  cpgs <- names(probes)
+  
+  ann <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+  
+  # Check number of genes that significant adj_df are annotated to
+  # check <- getMappedEntrezIDs(sig.cpg = cpgs)
+  # length(check$sig.eg)
+  
+  if(Go & is.null(kegg) & fract_counts){
+    message("Testing GO with fraction counts")
+    gst <- gometh(sig.cpg = cpgs, 
+                  collection = "GO",
+                  array.type = "EPIC",
+                  sig.genes = TRUE,
+                  anno = ann,
+                  prior.prob = TRUE,
+                  fract.counts = TRUE,
+                  plot.bias = TRUE)
+  }else if(kegg & fract_counts){
+    message("Testing KEGG with fraction counts")
+    gst <- gometh(sig.cpg=cpgs,
+                  collection="KEGG",
+                  array.type = "EPIC",
+                  sig.genes = TRUE,
+                  anno = ann,
+                  prior.prob = TRUE,
+                  fract.counts = TRUE,
+                  plot.bias=TRUE)
+  } else if(Go & is.null(kegg) & !fract_counts) {
+    message("Testing GO without fraction counts")
+    gst <- gometh(sig.cpg = cpgs, 
+                  collection = "GO",
+                  array.type = "EPIC",
+                  sig.genes = TRUE,
+                  anno = ann,
+                  plot.bias = TRUE)
+  }
+  
+  
+  # gst <- gometh(sig.cpg=cpgs,
+  #               all.cpg = cpgs, 
+  #               collection="GO",
+  #               plot.bias=TRUE,
+  #               sig.genes = TRUE,
+  #               prior.prob = TRUE,
+  #               equiv.cpg = TRUE,
+  #               anno = ann)
+  # 
+  
+  # gst_kegg <- gometh(sig.cpg=cpgs,
+  #            all.cpg = cpgs,
+  #            collection="KEGG",
+  #            plot.bias=TRUE,
+  #            sig.genes = TRUE,
+  #            prior.prob = TRUE,
+  #            equiv.cpg = TRUE)
+  
+  
+  gst
+}
+
+
+```
+
+```{r}
+# features from models 1 & 2
+# we had 370 GO terms at p < 0.05 but after updating the package
+#  we got some more significant GO terms = 403
+gst_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`)
+top_nonCpGXY <- gst_nonCpGXY[gst_nonCpGXY$P.DE <= 0.05, ]
+# top_nonCpGXY <- topGSA(gst_nonCpGXY)
+dim(top_nonCpGXY)
+
+
+kegg_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`,
+                              kegg = TRUE)
+top_kegg_nonCpGXY <- kegg_nonCpGXY[kegg_nonCpGXY$P.DE <= 0.05, ]
+# top_nonCpGXY <- topGSA(gst_nonCpGXY)
+dim(top_kegg_nonCpGXY)
+
+
+
+# features from model 3 with adjusted exposures
+gst_nonCpGXY_wd_Adj_exp <- get_pathways(df = adj_sc_df$`Without NonCpGXY ProbesWdAdjExp`)
+top_nonCpGXY_wd_Adj_exp <- gst_nonCpGXY_wd_Adj_exp[gst_nonCpGXY_wd_Adj_exp$P.DE <= 0.05, ]
+
+
+kegg_nonCpGXY_wd_Adj_exp <- get_pathways(df = adj_sc_df$`Without NonCpGXY ProbesWdAdjExp`,
+                              kegg = TRUE)
+top_kegg_nonCpGXY_wd_Adj_exp <- kegg_nonCpGXY_wd_Adj_exp[kegg_nonCpGXY_wd_Adj_exp$P.DE <= 0.05, ]
+# top_nonCpGXY <- topGSA(gst_nonCpGXY)
+dim(top_kegg_nonCpGXY_wd_Adj_exp)
+
+
+top_ls <- list("nonCpGXY_GO" = top_nonCpGXY,
+               "nonCpGXY_wd_Adj_exp_GO" = top_nonCpGXY_wd_Adj_exp,
+               "nonCpGXY_KEGG" = top_kegg_nonCpGXY,
+               "nonCpGXY_wd_Adj_exp_KEGG" = top_kegg_nonCpGXY_wd_Adj_exp)
+
+lapply(top_ls, head)
+lapply(top_ls, dim)
+
+top_ls_sorted <- lapply(top_ls, function(x) x[order(x$P.DE, decreasing = F), ])
+lapply(top_ls_sorted, dim)
+
+# this was for model 1 and 2
+# write.xlsx(top_ls_sorted, "../data/top_GO_KEGG_NonCpGXY_EN_approach.xlsx", 
+#            rowNames = T)
+
+# for models 1, 2 and 3
+write.xlsx(top_ls_sorted, "../data/top_GO_KEGG_NonCpGXY_EN_approach_models_1_2&3.xlsx",
+           rowNames = T)
+```
+
+### Load saved data
+
+```{r}
+# function to read all sheets
+read_allsheets <- function(path){
+  sheet_nms <- getSheetNames(path)
+  sheets <- lapply(sheet_nms, read.xlsx, xlsxFile = path)
+  names(sheets) <- sheet_nms
+  return(sheets)
+}
+
+# top_ls_sorted <- read_allsheets("../data/top_GO_KEGG_NonCpGXY_EN_approach.xlsx")
+
+top_ls_sorted <- read_allsheets("../data/top_GO_KEGG_NonCpGXY_EN_approach_models_1_2&3.xlsx")
+
+lapply(top_ls_sorted, dim)
+nms <- names(top_ls_sorted)
+top_ls_sorted <- lapply(seq_along(top_ls_sorted), function(i){
+  if (i %in% c(1, 2)){
+    colnames(top_ls_sorted[[i]])[1] <- "GO"
+    top_ls_sorted[[i]]
+  }else{
+    colnames(top_ls_sorted[[i]])[1] <- "KEGG"
+    top_ls_sorted[[i]]
+  }
+})
+names(top_ls_sorted) <- nms
+lapply(top_ls_sorted, dim)
+
+# common terms in models 1/2 and 3
+table(top_ls_sorted$nonCpGXY_GO$GO %in% top_ls_sorted$nonCpGXY_wd_Adj_exp_GO$GO)
+
+# lets get the common terms. We will merge the data, but add adjusted exp to the column names of the adjusted dataset to differentiate with unadjusted (models 1 and 2)
+adj_exp <-  lapply(top_ls_sorted[c(2,4)], function(x) {
+  names(x) <- paste0(names(x), ".Adj_exp")
+  x
+})
+comn_go <- merge(top_ls_sorted$nonCpGXY_GO, 
+                 adj_exp$nonCpGXY_wd_Adj_exp_GO,
+                 by = 1)
+
+comn_kegg <- merge(top_ls_sorted$nonCpGXY_KEGG, 
+                 adj_exp$nonCpGXY_wd_Adj_exp_KEGG,
+                 by = 1)
+
+top_ls_sorted$Common_GO <- comn_go
+top_ls_sorted$Common_KEGG <- comn_kegg
+
+lapply(top_ls_sorted, dim)
+
+top_ls_sorted <- lapply(top_ls_sorted, function(x) {
+  x %>%
+    arrange(P.DE)
+})
+
+# save the updated list
+write.xlsx(top_ls_sorted, "../data/top_GO_KEGG_NonCpGXY_EN_approach_models_1_2&3.xlsx",
+           rowNames = F)
+
+table(top_ls_sorted$nonCpGXY_KEGG$KEGG %in% top_ls_sorted$nonCpGXY_wd_Adj_exp_KEGG$KEGG)
+```
+
+### Top GO terms ISTSS
+
+```{r, fig.width=9, fig.height=6.5}
+
+
+top_25 <- top_ls_sorted$nonCpGXY_GO[1:25, ]
+top_25$ont_new <- paste0(top_25$ONTOLOGY, ":", top_25$TERM)
+
+plot_bar <- function(df, x, y, clr = NULL, fill = NULL, 
+                     xlab, ylab, title, fac_names, 
+                     fig_legend = TRUE,
+                     angle = FALSE,
+                     leg_pos = 'right',
+                     leg_title, 
+                     italic = FALSE,
+                     face = NULL){
+  p <- df %>%
+    ggplot( aes_string(x=x, y=y, colour = clr, fill = fill)) +
+    geom_bar(stat="identity", alpha=.5, width=.3) +
+    coord_flip() +
+    xlab(xlab) +
+    ylab(ylab) +
+    ggtitle(title)
+  
+  if(!angle & !italic){
+    p = p + theme(axis.text.x = element_text(colour="black"), 
+                  axis.text.y =element_text(colour="black"),
+                  legend.position = leg_pos) + th
+  }
+  else if (italic){
+    p = p + theme(axis.text.x = element_text(colour="black"), 
+                  axis.text.y = element_text(colour="black", face = face),
+                  legend.position = leg_pos) + th
+  }else{
+    p = p + theme(axis.text.x = element_text(colour="black", 
+                                             angle = 60, vjust = 0.5), 
+                  axis.text.y = element_text(colour="black"),
+                  legend.position = leg_pos) + th
+  }
+  
+  
+  if(!fig_legend){
+    p <- p + theme(legend.position = 'none')
+  }
+  
+  if(leg_pos == 'top' | leg_pos == 'bottom'){
+    print("----------------")
+    p <- p + guides(fill=guide_legend(nrow=3, byrow=TRUE,
+                                      title = leg_title))
+  }else{
+    p <- p + guides(fill=guide_legend(title = leg_title))
+  }
+  
+  p
+}
+
+top_25 <- top_25 %>%
+  mutate(TERM = fct_reorder(TERM, P.DE, .desc = T))
+
+plot_bar(df = top_25, 
+         x = "TERM",
+         y = "P.DE",
+         fill = "ONTOLOGY",
+         xlab = "Ontology term",
+         ylab = "P value",
+         title = "Gene Ontology: top 25",
+         leg_title = "Ontology")
+
+```
+
+```{r, fig.width=4, fig.height=4}
+
+non_cpgXY_grp <- top_ls_sorted$nonCpGXY_GO %>% 
+  group_by(ONTOLOGY) %>%
+  summarise(n = n())
+
+non_cpgXY_grp <- non_cpgXY_grp %>% 
+  mutate(Term = case_when(
+    ONTOLOGY == "BP" ~ "Biological Processes (BP)",
+    ONTOLOGY == "CC" ~ "Cellular Component (CC)",
+    ONTOLOGY == "MF" ~ "Molecular Function (MF)")) %>%
+  mutate(ONTOLOGY = fct_reorder(ONTOLOGY, n, .desc = T))
+
+
+plot_bar(df = non_cpgXY_grp,
+         x = "ONTOLOGY",
+         y = "n",
+         fill = "Term",
+         xlab = "Ontology",
+         ylab = "Number of terms", 
+         title = "Ontology",
+         fig_legend = TRUE,
+         leg_pos = 'top',
+         leg_title = '')
+```
+
+### Pathways
+
+```{r, fig.width=9, fig.height=6.5}
+top_25_path <- top_ls_sorted$nonCpGXY_KEGG[1:25, ]
+top_25_path <- top_25_path %>%
+  mutate(Description = fct_reorder(Description, DE, .desc = F))
+View(top_25_path)
+
+plot_bar(df = top_25_path,
+         x = "Description",
+         y = "DE",
+         fill = "P.DE",
+         xlab = "Description",
+         ylab = "Number of differentialy expressed genes", 
+         title = "Top 25 pathways",
+         fig_legend = TRUE,
+         leg_title = 'pvalue')
+
+```
+
+### Plot top features with effect sizes
+
+```{r, fig.width=10}
+# As annotation file has many duplicate gene
+# Lets split them and get only unique ones
+
+imp_cpgs_annot_long <- lapply(imp_cpgs_annot, function(x){
+  y <- x %>% separate_rows(UCSC_RefGene_Name)
+  y[!duplicated(y$UCSC_RefGene_Name, incomparables = NA), ] # mapinfo & gene name
+}) 
+
+View(imp_cpgs_annot_long$`Without NonCpGXY Probes`)
+
+
+importance_noncpgxy <- imp_cpgs_annot_long$`Without NonCpGXY Probes`
+
+# top 25 
+top_25_es <- rbind(head(importance_noncpgxy, 13), tail(importance_noncpgxy, 12))
+View(top_25_es)
+
+# make annotation column
+top_25_es$annotation <- ifelse(is.na(top_25_es$UCSC_RefGene_Name), top_25_es$Feature, top_25_es$UCSC_RefGene_Name)
+
+# top_25_es$annotation <- ifelse(is.na(top_25_es$UCSC_RefGene_Name), top_25_es$Feature, paste0(top_25_es$Feature, ": ", top_25_es$UCSC_RefGene_Name))
+
+top_25_es <- top_25_es %>%
+  mutate(annotation = fct_reorder(annotation, Importance, .desc = F))
+
+# create face - meaing for each label if it is plain or italic
+# childhood trauma and trauma should be plain
+# genes should be italic
+top_25_es <- top_25_es %>%
+  mutate( face = case_when(
+    grepl('Child|Trauma', levels(annotation)) ~ "plain",
+    TRUE ~ "italic"
+  ))
+
+top_25_es$Relation_to_UCSC_CpG_Island <- ifelse(top_25_es$Relation_to_UCSC_CpG_Island == '', NA, top_25_es$Relation_to_UCSC_CpG_Island)
+
+
+#%>%
+#mutate(face = factor(face, levels = c("plain", "italic")))
+```
+
+```{r, fig.width=9, fig.height=6.5}
+ptsd_genes <- read.xlsx("../data/Genes associated with disease.xlsx")
+View(ptsd_genes)
+
+ptsd_only <- ptsd_genes[grepl("PTSD", ptsd_genes$Disease_Role), ]
+
+top_25_es_wd_ptsd <- merge(top_25_es, ptsd_only,
+                           by.x = 'annotation', by.y = "Gene",
+                           all = T)
+
+top_25_es_wd_ptsd <- top_25_es_wd_ptsd[order(top_25_es_wd_ptsd$Importance, decreasing = T), ]
+
+
+
+plot_imp <- plot_bar(top_25_es_wd_ptsd, 
+                     x = "annotation",
+                     y = "Importance", 
+                     fill = "Disease_Role",
+                     xlab = "Features",
+                     ylab = "Weight (effect size)",
+                     title = "Top 25 features",
+                     leg_title = 'Gene associated with:',
+                     italic = TRUE,
+                     face = top_25_es$face)
+plot_imp
+```
+
+### Top features with annotation for PTSD and others
+
+```{r, fig.width=10 }
+ptsd_genes <- read.xlsx("../data/Genes associated with disease.xlsx")
+View(ptsd_genes)
+
+
+top_25_es_all <- merge(top_25_es, ptsd_genes,
+                       by.x = 'annotation', by.y = "Gene",
+                       all = T)
+top_25_es_all <- top_25_es_all[order(top_25_es$Importance, decreasing = T), ]
+
+
+
+plot_imp <- plot_bar(top_25_es_all, 
+                     x = "annotation",
+                     y = "Importance", 
+                     fill = "Disease_Role",
+                     xlab = "Features",
+                     ylab = "Weight (effect size)",
+                     title = "Top 25 features",
+                     leg_title = 'Involved in:',
+                     italic = TRUE,
+                     face = top_25_es$face)
+plot_imp
+
+```
+
+```{r, fig.width=10}
+# Top and location based on CpG island
+plot_imp <- plot_bar(top_25_es, 
+                     x = "annotation",
+                     y = "Importance", 
+                     fill = "Relation_to_UCSC_CpG_Island",
+                     xlab = "Features",
+                     ylab = "Weight (effect size)",
+                     title = "Top 25 features",
+                     leg_title = 'Location',
+                     italic = TRUE,
+                     face = top_25_es$face)
+plot_imp
+```
+
+### Pathways for negative and positive coefficient features separately
+
+```{r}
+top_nonCpG_neg <- get_pathways(df = adj_sc_df_neg$`Without NonCpG Probes`)
+top_nonCpG_neg
+
+top_nonCpGXY_neg <- get_pathways(df = adj_sc_df_neg$`Without NonCpGXY Probes`)
+top_nonCpGXY_neg
+
+top_nonCpG_pos <- get_pathways(df = adj_sc_df_pos$`Without NonCpG Probes`)
+top_nonCpG_pos
+
+top_nonCpGXY_pos <- get_pathways(df = adj_sc_df_pos$`Without NonCpGXY Probes`)
+top_nonCpGXY_pos
+```
+
+### Check how many cpgs are on X/Y chromosomes
+
+```{r}
+
+dim(annot_file)
+
+# get the important cpgs from `Without NonCpG Probes`
+imp_cpgs <- annot_file[which(annot_file$IlmnID %in% colnames(adj_sc_df$`Without NonCpG Probes`)), ]
+dim(imp_cpgs)
+
+table(imp_cpgs$IlmnID %in% colnames(adj_sc_df$`Without NonCpG Probes`))
+
+# get X/Y chromosome CpGs
+xy_cpgs <- imp_cpgs %>% filter(CHR == 'X' | CHR == 'Y')
+dim(xy_cpgs)
+
+xy_cpgs <- xy_cpgs %>% dplyr::select(IlmnID, MAPINFO, UCSC_RefGene_Name, CHR)
+
+# merge to get feature importance
+xy_cpgs <- merge(xy_cpgs, weights$`Without NonCpG Probes`, by = 1)
+dim(xy_cpgs)
+View(xy_cpgs)
+
+# write.csv(xy_cpgs, file = "../data/XY_chromosome_CpGs_in_important_features_selected_wd_EN.csv",
+#           row.names = F)
+```
+
+### Check common features between two datasets
+
+```{r}
+comn <- table(adj_sc_df$`Without NonCpG Probes` %in% adj_sc_df$`Without NonCpGXY Probes`)
+
+comn
+
+not_comn <- which(adj_sc_df$`Without NonCpG Probes` %in% adj_sc_df$`Without NonCpGXY Probes`)
+# not_comn
+```
+
+### Now lets check how many CpGs (important features) are in the significant hits (Seyma) in meta-analysis for PTSD
+
+```{r}
+p <- "../../../SignificantHits_Seyma/"
+f_ls <- list.files(p, pattern = ".csv")
+sig_hits <- lapply(f_ls, function(x) read.csv(paste0(p, x)))
+
+f_names <- tools::file_path_sans_ext(f_ls)
+names(sig_hits) <- f_names
+lapply(sig_hits, dim)
+
+# get significant hits from dfs
+sig_hits_imp_fea <- lapply(seq_along(sig_hits), function(i){ # loop over sig hits dfs
+  x <- lapply(adj_sc_df, function(y){ # loop over non-cpgs and non-cpgsxy dfs
+    d <- sig_hits[[i]]
+    s <- d[which(d$IlmnID %in% colnames(y)), ]
+  })
+  names(x) <- sheet_names
+  x
+})
+names(sig_hits_imp_fea) <- f_names
+
+print("Overlap between multi-hypo corrected sig hits and important features")
+lapply(sig_hits_imp_fea$MainResults_IVW_EpigenomeSig, dim)
+
+print("Overlap between nominally sig hits and important features")
+lapply(sig_hits_imp_fea$MainResults_IVW_nominalSig, dim)
+
+```
+
+### Now get these overlapped significant hits including two phenotype vars to check prediction power
+
+```{r}
+add_cols <- cols[1:2] # we need traumanum and childmt
+
+# get the overlapping cpgs plus trauma num and childmt to calculate risk score
+adj_sc_df_ovlp <- lapply(seq_along(adj_sc_df), function(i){
+  x <- adj_sc_df[[i]]
+  y <- sig_hits_imp_fea$MainResults_IVW_nominalSig[[i]]
+  x_sub <- x[, which(colnames(x) %in% y$IlmnID)]
+  x <- cbind(x_sub, x[, add_cols])
+})
+
+lapply(adj_sc_df_ovlp, dim)
+
+
+weights_ovlp <- lapply(seq_along(adj_sc_df_ovlp), function(i){
+  x <- adj_sc_df_ovlp[[i]]
+  y <- weights[[i]]
+  y[which(y$Feature %in% colnames(x)), ]
+})
+lapply(weights_ovlp, dim)
+
+Map(function(x,y) table(colnames(x) == y$Feature), adj_sc_df_ovlp, weights_ovlp)
+
+adj_sc_df_ovlp <- calculate_score(adj_sc_df_ovlp, weights_ovlp,
+                                  adj_df$`Without NonCpG Probes`,
+                                  add_col = 'CurrentPTSD')
+
+
+lmr_ovlp <- lm_helper(df = adj_sc_df_ovlp, f = f_cur_ptsd)
+lmr_ovlp
+
+```
+
+### Lets check the previously found significant hits
+
+```{r}
+prev_cpgs <- read.xlsx("../data/CpGs previosly found PGC.xlsx")
+dim(prev_cpgs)
+View(prev_cpgs)
+
+prev_cpgs_ovlp <- lapply(adj_sc_df, function(x){
+  prev_cpgs[which(prev_cpgs$CPG %in% colnames(x)), ]
+})
+
+lapply(prev_cpgs_ovlp, dim)
+```
+
+### How many GRRN genes are on the list
+
+```{r}
+
+grrn <- read.csv("../data/GRRN_unique_annot_ACB.csv")
+grrn <- grrn[!grrn$Gene == "", ]
+dim(grrn)
+
+grrn_ovlp <- lapply(imp_cpgs_annot_long, function(x){
+  merge(x, grrn, by.x = 'UCSC_RefGene_Name', by.y = 'Gene')
+})
+
+lapply(grrn_ovlp, dim)
+print(grrn_ovlp)
+
+```

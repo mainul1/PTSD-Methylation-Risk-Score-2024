@@ -1,0 +1,479 @@
+---
+title: "TestRiskScores"
+author: "Agaz Wani"
+date: "11/12/2021"
+output: html_document
+---
+
+### Note: Please generate the Rmarkdown (and to maintain size an font of plot) and share with me. You can run the file chunk wise and then generate Rmarkdown as final file. Here we'll use without nonCpGs and XY probes dataset.
+
+### Update: 6/26/2023
+### Replace linear with logit model, use point-biserial correlation and update the plots for publication 
+### This notebook combines all three models 
+#### 1. Exposure and methylation risk score (eMRS)
+#### 2. Methylation only risk score (MoRS)
+#### 3. Methylation only risk score with adjusted exposures (MoRSAE) 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Clean workspace
+```{r}
+rm(list = ls())
+gc()
+```
+
+## Code to test association between risk scores and PTSD
+
+### Load libraries
+```{r, echo=FALSE, message=FALSE}
+library(ggplot2)
+library(corrplot)
+library(ggsignif)
+library(cowplot)
+library(dplyr)
+library(gridGraphics)
+library(grid)
+library(openxlsx)
+library(grid)
+library(gridExtra)
+```
+
+
+### Load the data that was saved in previous steps, i.e covariate adjusted and scaled. I.e. the output from files `Covariate_Adj_RiskScores_1.R` for eMRS and `Covariate_Adj_RiskScores_without_exp_vars_1.R` for MoRS and MORSAE.  
+```{r}
+
+emrs <- "../Data/Covariate adjusted and scaled data.xlsx" # Output of "Covariate_Adj_RiskScores_1.R"  
+
+mors_and_morsae <- "../Data/Covariate adjusted and scaled data wo exp vars.xlsx" # output of  Covariate_Adj_RiskScores_without_exp_vars_1.R
+
+
+# function to read all sheets
+read_allsheets <- function(path){
+  sheet_nms <- getSheetNames(path)
+  sheets <- lapply(sheet_nms, read.xlsx, xlsxFile = path)
+  names(sheets) <- sheet_nms
+  return(sheets)
+}
+
+# eMRS 
+emrs_df <- read_allsheets(path = emrs)
+
+# MoRS and MoRSAE
+mors_and_morsae_dfs <- read_allsheets(path = mors_and_morsae)
+
+
+# combine all three dfs together
+adj_df <- c(list("With Exposure Variables" = emrs_df$`Without NonCpGXY Probes`),
+            mors_and_morsae_dfs)
+
+```
+
+
+### Now setup the name of cohort
+```{r}
+cohort <- "VA Boston:" # change the name here
+```
+
+
+### Now convert some columns into factor. We decide to drop lifetime PTSD
+```{r}
+ptsd_cols <- "CurrentPTSD"
+adj_df <- lapply(adj_df, function(x){
+  x[ptsd_cols] <- lapply(x[ptsd_cols], factor)
+  x
+})
+
+```
+
+
+### Get correlation plot for important phenotypes. Assign new names to make it short and readeable. Keep Trauma exposures to find correlation with risk scores
+```{r}
+
+cor_cols_emrs <- c("TraumaNumber", "ChildhoodMaltreatment", 
+                "risk_score", ptsd_cols)  
+
+cor_cols_mors_morsae <- c("TraumaNumber", "ChildhoodMaltreatment", 
+                "meth_only_risk_score", ptsd_cols)
+
+# only current ptsd
+new_names_wd_exp <- c("Trauma", "Chd Trauma", "eMRS", "PTSD")
+
+new_names_wo_exp <- c("Trauma", "Chd Trauma", "MoRS", "PTSD")
+
+new_names_wd_adj_exp <- c("Trauma", "Chd Trauma", "MoRSAE", "PTSD")
+
+```
+
+
+### Function to get correlation and adjusted pvalue. Input is data frame, columns we want to get correlation for and new names to assign to columns. 
+```{r}
+get_correlation <- function(df, cols, new_names){
+  
+  
+  # As we have many dfs, lets check which cols are present
+  # and use those cols
+  cols_present <- which(cols %in% colnames(df))
+  cols <- cols[cols_present]
+  new_names <- new_names[cols_present]
+  
+  # get the cols from df and correlation
+  df <- df %>% select(cols)
+  indx <- sapply(df, is.factor)
+  df[indx] <- lapply(df[indx], function(x) as.numeric(as.character(x)))
+  colnames(df) <- new_names
+  cor_df <- cor(df)
+  p = cor.mtest(df, conf.level = 0.95)
+  
+  
+  # Point-biserial correlation between contineous and binary variables
+  res <- lapply(new_names, function(y){ # loop over cols
+    xcol <- 'PTSD'
+    ycol <- y
+    x1 <- df[[xcol]]
+    y <- df[[ycol]]
+    bc <- cor.test(y, x1)
+    res <- list(bc$estimate, bc$p.value, bc$statistic)
+    names(res) <- c('cor', 'p.val', 't')
+    res <- do.call(cbind, res)
+    rownames(res) <- ycol
+    res
+    })
+  res <- do.call(rbind, res)
+  
+  # replace cor and pval with point biserial
+  cor_df[, "PTSD"] <- res[, "cor"]
+  p$p[, "PTSD"] <- res[, 'p.val']
+
+  # adjusted pvalues
+  p_adj <- matrix(p.adjust(as.vector(as.matrix(p$p)),
+                           method='fdr'),
+                  ncol=ncol(cor_df))
+  rownames(p_adj) <- new_names
+  colnames(p_adj) <- new_names
+
+  # point biserial padjusted between contineous and PTSD
+  p_adj_bs <- p.adjust(res[, 'p.val'], method = 'fdr')
+  p_adj[, "PTSD"] <- p_adj_bs
+  df_ls <- list(cor_df, p_adj, p$p)
+  names(df_ls) <- c("cor", "padj", "pval")
+  return(df_ls)
+}
+
+# color palette
+colrs <- colorRampPalette(c("#0072B5FF", '#7F0000',
+                            '#FF7F00', 'orange',
+                            'cyan', '#007FFF', 'blue', '#00007F',
+                            "#BC3C29FF"))
+```
+
+
+
+### Now call the function to get correlation
+```{r, fig.width=6, fig.height=5}
+
+cor_adj_df <- lapply(seq_along(adj_df), function(i){ # loop over each df 
+  if(names(adj_df)[i] == "With Exposure Variables"){ # eMRS
+    new_names <- new_names_wd_exp
+    cor_cols <- cor_cols_emrs
+    
+  }else if(names(adj_df)[i] == "Without Exposures in model"){ # MoRS
+    new_names <- new_names_wo_exp
+    cor_cols <- cor_cols_mors_morsae
+    
+  }else{ 
+    new_names <- new_names_wd_adj_exp # MoRSAE
+    cor_cols <- cor_cols_mors_morsae
+  }
+  
+  get_correlation(df = adj_df[[i]], cols = cor_cols,
+                  new_names = new_names)
+})
+
+names(cor_adj_df) <- names(adj_df)
+print(cor_adj_df)
+  
+ 
+
+# Function to get correlation between different variables
+correlation_plot <- function(cor_df, title=NULL){
+  corrplot(cor_df$cor,
+  p.mat = cor_df$padj,
+  diag = TRUE, method = "pie",
+  type = "upper",  number.cex = 0.8,
+  tl.col = "black", tl.srt = 45,
+  tl.cex = 1.4, cl.cex = 1.4,
+  sig.level = c(0.001, 0.01, 0.05),
+  pch.cex = 1.4,insig = 'label_sig',
+  cl.ratio = 0.4,
+  mar = c(0,0,1,0),
+  col = colrs(10),
+  title = title)
+  recordPlot()
+}
+
+
+# Helper function to get correlation between variable. 
+# It will run the above correlation function for all the data 
+correlation_plot_helper <- function(cor_df){
+  if(is.list(cor_df)){ # loop over study
+    n <- names(cor_df)
+    p <- lapply(seq_along(cor_df), function(i) {
+      p <- correlation_plot(cor_df[[i]])
+      })
+    names(p) <- n
+    p
+    }else{
+    p <- correlation_plot(cor_df)
+    }
+}
+  
+
+p_adj <- correlation_plot_helper(cor_df = cor_adj_df)
+
+```
+
+## Correlation plot grid
+```{r, fig.width=13, fig.height=6}
+plot_grid(p_adj$`With Exposure Variables`,
+          p_adj$`Without Exposures in model`, 
+          p_adj$`With Adjusted Exposures`, 
+          rel_widths = c(1,1,1), nrow = 1)
+```
+
+
+## linear model plot setting and function
+```{r}
+th <-   theme(plot.title = element_text(size = 20, hjust = 0.5),
+              axis.title = element_text(size =18),
+              axis.text = element_text(size = 16),
+              legend.title = element_text( size = 18),
+              legend.text = element_text(size = 16))
+```
+
+
+# Logistic regression model, risk scores predicting PTSD
+```{r}
+
+logit_helper <- function(df, f){
+  
+  print("=====================================================")
+  if(inherits(df, "list")){
+    n <- names(df)
+    logit <- lapply(seq_along(df), function(i){
+      if (n[i] == "With Exposure Variables"){ # if eMRS
+        f <- f_ptsd_emrs
+        }else{f <- f_ptsd_meth}     # MoRS or MoRSAE
+      
+      analy <- paste(c(
+        paste(c("Data frame", deparse(substitute(df))), collapse = ':'),
+        paste(c("Formula", f), collapse = ':')), collapse = ', ')
+      print(analy)
+      
+      # logit
+      x <- glm(f, data = df[[i]], family = "binomial")
+      print(n[i])
+      print(summary(x))
+      x
+    }) 
+  }
+}
+
+
+# formula for logistic regression model
+f_ptsd_emrs <- as.formula(paste('CurrentPTSD~', 'risk_score'))
+f_ptsd_meth <- as.formula(paste('CurrentPTSD~', 'meth_only_risk_score'))
+
+# sink("../Data/Linear model PTSD summary with and wo exposure variables.txt") # path to output file
+
+
+# Methylation only risk scores Vs. current PTSD
+logit_adj_meth <- logit_helper(df = adj_df, f = f_ptsd_meth)
+
+ci <- lapply(logit_adj_meth, function(x) confint(x))
+names(ci) <- names(adj_df)
+print(ci)
+
+# sink()
+
+```
+
+
+### Density plot function
+
+```{r}
+make_densityplot <- function(df, x, y, xlab, ylab, fig_legend = TRUE,
+                             title = '', legend = '', facet = FALSE){
+  
+  p <- ggplot(data=df, aes_string(x=x, group=y, fill=y)) +
+    geom_density(adjust=1.5, alpha=.8) +
+    theme_classic()
+  
+  if(facet != FALSE){
+    print('Adding facet')
+    p <- p + facet_wrap(as.formula(paste("~", facet)))+
+      theme(strip.text.x = element_text(size = 16))
+  }
+    
+  
+  if(fig_legend){
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF"))
+  }else{
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF")) +
+      theme(legend.position = 'none')
+  }
+
+  p <- p + ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)+ th
+}
+```
+
+
+
+## Box plot function
+```{r}
+make_boxplot <- function(df, x, y, xlab, ylab,
+                         test_pval, y_pos, title = ""){
+  p <- df %>%
+    ggplot(aes_string(x = x, y = y, fill = x)) +
+    geom_boxplot(lwd = 1) +
+    scale_fill_manual(values = c("#0072B5FF", "#BC3C29FF")) +
+    geom_jitter(size=1.7, alpha=0.9) +
+    theme_classic()+
+    theme(legend.position="none") + th +
+
+    ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)
+
+  # add significance
+  p + geom_signif(
+    annotation = formatC(test_pval, digits = 2),
+    y_position = y_pos , xmin = 1, xmax = 2, size = 1,
+    textsize = 5, tip_length = c(0.15, 0.02))
+}
+
+```
+
+
+
+### Plot for publication. We will plot data without nonCpGs and XY probes.
+
+```{r, fig.height=7.5, fig.width=9}
+# Density plots ---------------
+
+p1_emrs <- make_densityplot(df = adj_df$`With Exposure Variables`, 
+                       x = 'risk_score',
+                       y = 'CurrentPTSD',
+                       xlab = 'eMRS',
+                       ylab = "Density",
+                       fig_legend = FALSE)
+
+
+p1_mors <- make_densityplot(df = adj_df$`Without Exposures in model`, 
+                       x = 'meth_only_risk_score',
+                       y = 'CurrentPTSD',
+                       xlab = 'MoRS',
+                       ylab = "",
+                       fig_legend = FALSE)
+
+
+p1_morsae <-  make_densityplot(df = adj_df$`With Adjusted Exposures`, 
+                       x = 'meth_only_risk_score',
+                       y = 'CurrentPTSD',
+                       xlab = 'MoRSAE',
+                       ylab = "",
+                       legend = "Current\n PTSD")
+
+
+# Box plot ----------------------
+
+
+wcox_emrs <- wilcox.test(risk_score ~ CurrentPTSD, 
+                        data = adj_df$`With Exposure Variables`)
+wcox_emrs
+wcox_emrs$p.value
+
+# MoRS
+wcox_mors <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                        data = adj_df$`Without Exposures in model`)
+wcox_mors
+wcox_mors$p.value
+
+# MoRSAE
+wcox_morsae <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                        data = adj_df$`With Adjusted Exposures`)
+wcox_morsae
+wcox_morsae$p.value
+
+
+
+p2_emrs <- make_boxplot(df = adj_df$`With Exposure Variables`, 
+                        x = 'CurrentPTSD',
+                        y = 'risk_score',
+                        xlab = '',
+                        ylab = 'eMRS',
+                        test_pval = wcox_emrs$p.value,
+                        y_pos = 3.5, #location to show significance, please change if needed
+                        title = "")
+
+
+p2_mors <- make_boxplot(df = adj_df$`Without Exposures in model`, 
+                        x = 'CurrentPTSD',
+                        y = 'meth_only_risk_score',
+                        xlab = '',
+                        ylab = 'MoRS',
+                        test_pval = wcox_mors$p.value,
+                        y_pos = 3.5, #location to show significance, please change if needed
+                        title = "")
+
+
+p2_morsae <- make_boxplot(df = adj_df$`With Adjusted Exposures`, 
+                        x = 'CurrentPTSD',
+                        y = 'meth_only_risk_score',
+                        xlab = '',
+                        ylab = 'MoRSAE',
+                        test_pval = wcox_morsae$p.value,
+                        y_pos = 3.5, #location to show significance, please change if needed
+                        title = "")
+
+
+# arrange den plots
+p_den <- cowplot::plot_grid(p1_emrs, p1_mors, p1_morsae,
+                            nrow = 1, rel_widths = c(1.5, 1.5, 2))
+
+# add title to den plots
+title_den.grob <- textGrob("Distribution of risk scores",
+                           
+                   gp=gpar(fontsize=20), vjust = 1)
+
+p_den <- grid.arrange(arrangeGrob(p_den, top = title_den.grob))
+
+# arrange box plots
+p_box <- cowplot::plot_grid(p2_emrs, p2_mors, p2_morsae,
+                            nrow = 1)
+
+# add title to box plots
+title.grob <- textGrob("Difference in risk scores",
+                   gp=gpar(fontsize=20), vjust = 1)
+
+p_box <- grid.arrange(arrangeGrob(p_box, top = title.grob))
+
+# add x label to box plots
+x.grob <- textGrob("Current PTSD",
+                   gp=gpar(fontsize=18), vjust = -2)
+
+# arrange plots in grid
+p_comb <- cowplot::plot_grid(p_den,p_box, nrow = 2)
+
+grid.arrange(arrangeGrob(p_comb, bottom = x.grob))
+
+```
+
+

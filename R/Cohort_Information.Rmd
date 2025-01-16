@@ -1,0 +1,317 @@
+---
+title: "Cohort Information"
+author: "Agaz Wani"
+date: "1/15/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Summary information from different PGC cohorts for Machine learning
+
+```{r packages, echo=FALSE, message=FALSE}
+# library(openxlsx)
+library(xlsx)
+library(kableExtra)
+library(data.table)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(hrbrthemes)
+library(corrplot)
+library(cowplot)
+```
+
+
+```{r dnhs, echo=FALSE}
+dnhs_pheno <- read.csv("G:/DNHS 2nd Batch/DNHS2ndBatachAnalysis/data/DNHS_Pheno_Batch1&2_with_childhoodT_gad_phq.csv")
+
+dnhs_450k_187 <- read.csv("E:/DNHS_EWAS/DNHS_450k_Pheno187_without_sexMM.csv")
+
+dnhs_450K_72 <- read.csv("E:/DNHS_EWAS/Uddin_meth_sample_sheet_72Samp_CORRECTED_10.18.15_ACB.csv",
+                         skip = 7)
+
+dnhs_450K <- nrow(dnhs_450k_187) + nrow(dnhs_450K_72)
+
+```
+
+
+```{r gtp, echo=FALSE}
+gtp_pheno <- read.csv("G:/GTP Data/QCd Data/Agaz_ML_Pheno.csv")
+gtp_epic <- sum(!is.na(gtp_pheno$EPIC_795))
+gtp_450K <- nrow(gtp_pheno)-gtp_epic
+
+# missing percentage in each column
+unlist(lapply(gtp_pheno, function(x) mean(is.na(x))))
+
+```
+
+
+```{r mrs, echo=FALSE}
+mrs_pheno <- read.xlsx("G:/PGC ML/MRS/MRS_EWAS_sample_secondary_analysis_12012020.xlsx",
+                       sheetIndex = 4)
+mrs_meth <- fread("G:/PGC ML/MRS/MRS_noob_qcd_crossReactiveProbesRemoved_combat_CP_wcovar_age_ptsd_allPreAsControls.csv")
+
+# mrs sample sheet 3 shows the following numbers
+mrs_epic = 357
+mrs_450K = 277
+mrs_epic_avlb <- ncol(mrs_meth) - 1 # one is cpg ids
+
+```
+
+
+```{r armystarrs, echo=FALSE}
+armystarrs <- fread("G:/PGC ML/ArmySTARRS/Starrs_noob_qcd_crossReactiveProbesRemoved_combat_CP_wcovar_age2TP_ptsd_allPreAsControls.csv", data.table = FALSE)
+armystarrs_epic_avlb <- ncol(armystarrs) - 1
+```
+
+```{r prismo, echo=FALSE}
+prismo <- fread("G:/PGC ML/PRISMO/Prismo_noob_qcd_crossReactiveProbesRemoved_combat_CP_wcovar_age_ptsd_allPreAsControls.csv", data.table = F)
+prismo_aval <- ncol(prismo) - 1
+prismo_epic <- 181
+prismo_450K <- 46
+
+```
+
+#### 1. Sample Size from different cohorts
+```{r expected, echo=FALSE}
+Epic_exp <- c(nrow(dnhs_pheno),  gtp_epic,
+          mrs_epic, NA, prismo_epic)
+Epic_obs <- c(nrow(dnhs_pheno), gtp_epic, mrs_epic_avlb, 
+              armystarrs_epic_avlb, prismo_aval)
+
+samp_450K_exp <- c(dnhs_450K, gtp_450K, mrs_450K, NA, prismo_450K)
+samp_450K_obs <- c(dnhs_450K, gtp_450K, NA, NA, NA)
+
+sample_size <- data.frame("Expected" = Epic_exp, "Observed" = Epic_obs,
+                          "Expected_1" = samp_450K_exp, "Observed_1" = samp_450K_obs)
+
+sample_size <- sample_size %>% 
+  mutate(Expected_2 = rowSums(across(starts_with("Expected")), na.rm = T),
+         Observed_2 = rowSums(across(starts_with("Observed")), na.rm = T)) 
+ 
+sample_size[6, ] <- colSums(sample_size, na.rm = T)
+rownames(sample_size) <- c("DNHS", "GTP", "MRS", "ArmySTARRS", "PRISMO", "Total")
+
+# Create table
+kable(sample_size) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) %>%
+  add_header_above(c(" " = 1, "MethylationEPIC" = 2, "HumanMethylation450" = 2, "Total" = 2))
+
+```
+
+
+#### 2. Now get demographic information from different cohorts
+```{r pheno, echo=FALSE}
+dnhs_mn_cols <- c("Age","Life_PTS_severity", "TraumaNum",
+                  "childhood_cum_trauma", "life_worst_intrusion",
+                  "life_worst_avoidance", "life_worst_hyperarousal",
+                  "phq9sum", "gad7sum")
+
+dnhs_freq_cols <- c("Gender", "PTSDLife", "PTSDpm",
+                    "race6cat")
+
+  
+get_summary <- function(df, cols){
+  info <- lapply(cols, function(x){
+  c(mean = mean(df[, x], na.rm = T), sd = sd(df[, x], na.rm = T))
+})
+  df <- do.call(rbind, info)
+  rownames(df) <- cols
+  df
+}
+
+get_frequency <- function(df, cols){
+  info <- lapply(cols, function(x) table(df[, x]))
+}
+
+
+dnhs_mean <- get_summary(df = dnhs_pheno, cols = dnhs_mn_cols)
+dnhs_num <- get_frequency(df = dnhs_pheno, cols = dnhs_freq_cols)
+
+```
+
+
+#### GTP, only those samples that are used in ML
+```{r}
+gtp_epic_s <- gtp_pheno[!is.na(gtp_pheno$EPIC_795), ]
+gtp_good <- read.csv("G:/GTP Data/QCd Data/Pheno_662_samps.csv")
+gtp_epic_good <- gtp_epic_s[which(gtp_epic_s$EPIC_795 %in% gtp_good$BaseName), ] 
+
+gtp_mn_cols <- c("age", "caps_life_freqplusintens_combined",
+                 "TEI_TOTAL_TYPES_Experienced_somewitness",
+                 "CTQTOT", "PSS_Intrusive", "PSS_avoidnumb",       
+                 "PSS_hyperarousal", "BDItotalscore")
+gtp_freq_cols <- c("sex.x", "Current_PTSD_01", 
+                   "Life_PTSD_01", "race_ethnic")
+
+gtp_mean <- get_summary(df = gtp_epic_good, cols = gtp_mn_cols)
+gtp_num <- get_frequency(df = gtp_epic_good, cols = gtp_freq_cols)
+```
+
+
+#### MRS
+```{r}
+mrs_pheno <- read.csv("G:/PGC ML/MRS/MRS_Pheno.csv")
+mrs_pheno <- mrs_pheno[which(mrs_pheno$BaseName %in% colnames(mrs_meth)), ]
+
+mrs_mn_cols <- c("Age", "CAPStots",
+                 "LECCUM_Stringent",
+                 "CTQ_TOTAL", "CAPSBs", "CAPSCs",       
+                 "CAPSDs", "BDI2_SUM", "BAI_SUM")
+
+mrs_freq_cols <- c("Sex", "CAPSF1I2s", "ba_race")
+
+
+mrs_mean <- get_summary(df = mrs_pheno, cols = mrs_mn_cols)
+mrs_num <- get_frequency(df = mrs_pheno, cols = mrs_freq_cols)
+
+```
+
+
+### Armystarrs
+```{r}
+armystarrs <- fread("G:/PGC ML/ArmySTARRS/Starrs_noob_qcd_crossReactiveProbesRemoved_combat_CP_wcovar_age2TP_ptsd_allPreAsControls.csv", data.table = F)
+armystarrs_pheno <- read.csv("G:/PGC ML/ArmySTARRS/STARRS_Pheno_PCs_CellTypes.csv")
+length(unique(armystarrs_pheno$SID))
+```
+
+
+### PRISMO
+```{r}
+prismo <- fread("G:/PGC ML/PRISMO/Prismo_noob_qcd_crossReactiveProbesRemoved_combat_CP_wcovar_age_ptsd_allPreAsControls.csv", data.table = F)
+prismo_pheno <- read.csv("G:/PGC ML/PRISMO/Prismo_Pheno_051220.csv")
+dim(prismo)
+dim(prismo_pheno)
+length(unique(prismo_pheno$ID))
+
+```
+
+
+```{r}
+# comb <- do.call(cbind, list(dnhs_mean, gtp_mean, mrs_mean))
+```
+
+
+### Phenotype histogram
+```{r}
+all_cohorts <- read.xlsx("G:/PGC ML/All Cohorts/Phenotype_info_ALL.xlsx", 
+                         sheetIndex = 3, startRow = 2, endRow = 16)
+
+# all_cohorts <- column_to_rownames(all_cohorts, var = "Phenotype")
+all_cohorts_long <- all_cohorts %>% pivot_longer(!Phenotype, names_to = "Data",
+                                                 values_to = "Available")
+
+```
+
+
+```{r fig.height=5, fig.width=12, message=F, warning=FALSE}
+ggplot(all_cohorts_long, aes(Data, Phenotype, color = Available)) + 
+  geom_point(size = 5)+
+  xlab("Cohorts") +
+  ylab("Phenotypes") +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size=12, face = "bold"),
+        legend.title = element_text(size = 12, face="bold"),
+        legend.text = element_text(size = 12))
+  
+```
+
+```{r}
+all_cohorts_scale <- read.xlsx("G:/PGC ML/All Cohorts/Phenotype_info_ALL.xlsx", 
+                         sheetIndex = 4, startRow = 2, endRow = 16)
+
+# all_cohorts <- column_to_rownames(all_cohorts, var = "Phenotype")
+all_cohorts_scale_long <- all_cohorts_scale %>% pivot_longer(!Phenotype, names_to = "Data",
+                                                 values_to = "Scale")
+```
+
+
+```{r fig.height=6, fig.width=14, message=F, warning=FALSE}
+ggplot(all_cohorts_scale_long, aes(Data, Phenotype, group=Scale,
+                                   color = Scale, shape=Scale)) + 
+  geom_point(size = 6)+
+  scale_shape_manual(values = 0:30)+
+  xlab("Cohorts") +
+  ylab("Phenotypes") +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size=12, face = "bold"),
+        axis.text.x = element_text(angle = 70, vjust = 0.5),
+        legend.title = element_text(size = 14, face="bold"),
+        legend.text = element_text(size = 14))
+
+```
+
+
+### Correlation plots for phenotypes
+
+```{r}
+all_cohorts <- read.csv("G:/PGC ML/Pre_Processed Data/2021-05-01_11-46-08/DNHS_GTP_MRS_ArmyS_Prismo_Pheno.csv")
+
+rm_cols <- c("X", "Basename", "Study", 'Race', 'Mdd')
+all_cohorts_cleaned <- all_cohorts[, which(!colnames(all_cohorts) %in% rm_cols)]
+
+```
+
+
+```{r,fig.width=12, fig.height=8}
+library(GGally)
+ggcorr(all_cohorts_cleaned, legend.position = "right",
+       hjust = .75)
+```
+
+
+```{r}
+dfs_sep <- split(all_cohorts, all_cohorts$Study)
+lapply(dfs_sep, dim)
+```
+
+```{r, fig.width=8, fig.height=8}
+dfs_sep_clean <- lapply(dfs_sep, function(x){
+  x[, which(!colnames(x) %in% rm_cols)]
+})
+
+# when using individual cohorts, some have only 1 value in a column e.g gender
+# so we need to remove those in correlation plot.
+# also remove those columns that have all nas
+
+dfs_sep_final <- lapply(dfs_sep_clean, function(x){
+  idx <- sapply(dfs_sep_clean$Armystarrs, function(x) length(unique(x)) > 1)
+  x <- x[idx]
+  x <- x[,colSums(is.na(x))<nrow(x)]
+})
+
+df_names <- names(dfs_sep_final)
+# par(mfrow=c(3,2))
+plots <- lapply(seq_along(dfs_sep_final), function(i){
+  M <- cor(dfs_sep_final[[i]], use = "complete.obs")
+  p <- corrplot(M, diag = FALSE, method = "ellipse",
+         type = "upper", tl.col = "black", tl.srt = 65,
+         tl.cex = 1.5,
+         title = df_names[i],
+         mar = c(1, 1, 2, 1))
+  
+})
+
+```
+
+
+```{r}
+plot_grid(plots[1])
+```
+
+
+```{r, fig.width=8, fig.height=8}
+require(corrplot)
+par(xpd=TRUE)
+M <- cor(all_cohorts_cleaned, use = "complete.obs")
+corrplot(M, diag = FALSE, method = "circle",
+         type = "upper", tl.col = "black", tl.srt=45,
+         title = "All Cohorts",
+         mar = c(2, 0, 2, 0))
+```
+
+

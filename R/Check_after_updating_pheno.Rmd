@@ -1,0 +1,75 @@
+---
+title: "Match old and updated files"
+author: "Agaz Wani"
+date: "6/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Code to check the difference in previous and updated phenotype data of with Armystarrs
+
+
+```{r, message=FALSE}
+library(dplyr)
+```
+
+### Load data
+```{r}
+army_f <- c("armystarrs_Pheno_ML.csv", "armystarrs_Pheno_ML_updated.csv")
+paths <- paste0("G:/PGC ML/ArmySTARRS/", army_f)
+nms <- c("old", "updated")
+armstars <- lapply(paths, read.csv)
+lapply(armstars, function(x) head(x[, 1:5]))
+names(armstars) <- nms
+
+lapply(armstars, dim)
+
+```
+
+
+### As old file has different timepoints(tp), so get relevant tp i.e, 2
+
+```{r}
+armstars$old <- armstars$old %>% subset(visit == 2)
+lapply(armstars, dim)
+View(armstars$updated)
+lapply(armstars, function(x) head(x[, 1:5]))
+
+```
+
+#### How many samples (sentrix id and postion) are matching
+```{r}
+table(armstars$old$BaseName %in% armstars$updated$BaseName)
+```
+
+#### How many columns are matching
+```{r}
+table(colnames(armstars$old) ==  colnames(armstars$updated))
+
+table(colnames(armstars$old) %in%  colnames(armstars$updated))
+
+# As specimen and phenotype collection dates were add, lets get those not matching
+colnames(armstars$updated)[which(!colnames(armstars$updated) %in% colnames(armstars$old))]
+
+armstars$old <- armstars$old[, which(colnames(armstars$old) %in% colnames(armstars$updated))]
+
+armstars$updated <- armstars$updated[, which(colnames(armstars$updated) %in% colnames(armstars$old))]
+lapply(armstars, dim)
+
+```
+
+
+#### Sort the columns and match
+```{r}
+
+armstars$old <- armstars$old[, order(match(colnames(armstars$old), colnames(armstars$updated)))]
+
+# Are all columns matching
+table(colnames(armstars$old) ==  colnames(armstars$updated))
+View(armstars$old)
+View(armstars$updated)
+all.equal(armstars$old, armstars$updated)
+```

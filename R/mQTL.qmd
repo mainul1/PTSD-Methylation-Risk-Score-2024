@@ -1,0 +1,239 @@
+---
+title: "mQTL Analysis"
+format: html
+editor: visual
+---
+
+### Libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(data.table)
+```
+
+## mQTL analysis for significant CpGs
+
+```{r}
+annot_file <- fread("D:/EWAS meta-analysis(Janelle)/data/infinium-methylationepic-v-1-0-b5-manifest-file.csv", 
+                    data.table = F, skip = 7, fill = T)
+dim(annot_file)
+
+annot_file_sub <- annot_file %>% 
+  dplyr::select(IlmnID,
+                Infinium_Design_Type,
+                Genome_Build, 
+                CHR, 
+                MAPINFO,
+                UCSC_RefGene_Name, 
+                UCSC_RefGene_Group, 
+                Relation_to_UCSC_CpG_Island, 
+                SNP_ID,
+                SNP_DISTANCE,
+                SNP_MinorAlleleFrequency)
+
+head(annot_file_sub)
+dim(annot_file_sub)
+```
+
+### Check how many CpGs have SNPs
+
+```{r}
+
+annot_file_sub_snps <- annot_file_sub %>%
+  filter(SNP_ID != "")
+dim(annot_file_sub_snps)
+View(head(annot_file_sub_snps, 100))
+
+
+# % of significant cpgs annotated to SNPs 
+get_percentage <- function(x, y){
+  round(nrow(x) / nrow(y)* 100, 2)
+}
+
+# % of CpGs with SNPs in annotation file
+per_cpg_snp_annot <- get_percentage(annot_file_sub_snps,
+                                    annot_file_sub)
+
+per_cpg_snp_annot
+```
+
+### Read weights file. We wre looking at data set noncpgs and XY probes removed
+
+```{r}
+feapath <- "G:/PGC ML/Combined Data/2022-03-30_15-07-11/EN_selected_wd_EN_l1_r_0.1.xlsx"
+
+
+weights <- openxlsx::read.xlsx(feapath, sheet = 2)
+
+dim(weights)
+
+head(weights)
+```
+
+### Merge weights and annotations
+
+```{r}
+annotated_cpgs <- merge(weights, 
+                        annot_file_sub,
+                        by = 1)
+dim(annotated_cpgs)
+head(annotated_cpgs)
+```
+
+### Filter out the CpGs with no SNP
+
+```{r}
+cpgs_wd_snps <- annotated_cpgs %>%
+  dplyr::filter(SNP_ID != "")
+dim(cpgs_wd_snps)
+View(cpgs_wd_snps)
+
+# get percentage of cpgs from our list that have SNPs in annotation file
+per_cpg_snp <- get_percentage(cpgs_wd_snps, annotated_cpgs)
+per_cpg_snp
+```
+
+### Split SNP columns
+
+```{r, warning=FALSE}
+library(splitstackshape)
+
+cpgs_wd_snps_sp <- cSplit(cpgs_wd_snps, c("SNP_ID", "SNP_DISTANCE", "SNP_MinorAlleleFrequency"), c(";"))
+```
+
+### Count SNPs
+
+```{r}
+# View(cpgs_wd_snps_sp)
+
+cpgs_wd_snps_sp <- cpgs_wd_snps_sp %>%
+  mutate(SNP_count = rowSums(!is.na(select(., contains("SNP_ID")))),
+         .after = "SNP_ID_11")
+
+View(cpgs_wd_snps_sp)
+
+# Unique CpGs
+length(unique(cpgs_wd_snps_sp$Feature))
+
+
+
+```
+
+### Plot
+
+```{r}
+
+# theme setting
+th <-   theme(plot.title = element_text(size = 20, hjust = 0.5),
+              axis.title = element_text(size =18),
+              axis.text = element_text(size = 16),
+              legend.title = element_text( size = 18),
+              legend.text = element_text(size = 16))
+
+ggplot(data = cpgs_wd_snps_sp, aes(SNP_count,
+                                   group = SNP_count)) +
+  geom_bar() +
+  ylab("# CpGs") +
+  xlab("# SNPs") +
+  ggtitle(paste0(nrow(cpgs_wd_snps_sp), " CpGs are annotated to SNPs from \nAnnotation file"))+
+  th
+```
+
+### Let's look at the mQTLs in [BIOS QTL browser](https://molgenis26.gcc.rug.nl/downloads/biosqtlbrowser/) which studied the role of DNA methylation in explaining the downstream effects of genetic variation. Genome-wide genotype and DNA methylation in whole blood from 3,841 samples from five Dutch biobanks were used.
+
+```{r}
+cis_mqtls <- fread("D:/mQTL data/2015_09_02_cis_meQTLsFDR0.05-CpGLevel.txt", data.table = F)
+
+dim(cis_mqtls)
+
+# Unique CpGs in cis meQTL 
+length(unique(cis_mqtls$ProbeName))
+
+
+head(cis_mqtls)
+
+# merge significant features, SNP info from annotation file and BIOS browser
+cis_mqtls_wd_weights <- merge(cpgs_wd_snps_sp, 
+                              cis_mqtls, 
+                              by.x = "Feature",
+                              by.y = "ProbeName")
+
+# count # of SNPs 
+cis_mqtls_wd_weights <- cis_mqtls_wd_weights %>%
+  group_by(Feature) %>%
+  mutate(SNP_count = n())
+
+dim(cis_mqtls_wd_weights)
+
+# Unique CpGs matching our list of CpGs 
+length(unique(cis_mqtls_wd_weights$Feature))
+
+
+View(cis_mqtls_wd_weights)
+```
+
+```{r}
+# get unique features
+unq_cis_mqtls_wd_weights <- cis_mqtls_wd_weights %>%
+  distinct(Feature, .keep_all = TRUE)
+dim(unq_cis_mqtls_wd_weights)
+
+# Percentage of CPGs in our significant list that have meQTL in BIOS browser
+per_meqtl <- get_percentage(unq_cis_mqtls_wd_weights,
+                            annotated_cpgs)
+per_meqtl
+
+# Plot
+ggplot(data = unq_cis_mqtls_wd_weights, aes(SNP_count)) +
+  geom_bar() +
+  ylab("# CpGs") +
+  xlab("# SNPs") +
+  ggtitle(paste0(nrow(unq_cis_mqtls_wd_weights), " CpGs are annotated to SNPs from BIOS QTL"))+
+  scale_x_continuous(breaks=c(2,4,6,8,10)) +
+  th
+
+```
+
+```{r}
+# check how may chromosomes are matching between annotation file and Bios QTL
+
+table(cis_mqtls_wd_weights$CHR == cis_mqtls_wd_weights$SNPChr)
+```
+
+### Plot percentage of cpgs annotated to SNPs or meQTL
+
+```{r}
+
+per_snp_meqtl <- data.frame("Percentage" = c(per_cpg_snp_annot,
+                                             per_cpg_snp, per_meqtl))
+
+per_snp_meqtl$Name <- c("Annotation file", "Significant CpGs", "meQTLs")
+per_snp_meqtl
+
+# Plot
+ggplot(data = per_snp_meqtl, aes(Name, Percentage)) +
+  geom_bar(stat = 'identity', width = 0.4) +
+  geom_text(aes(label = Percentage), vjust=1.6, color="white", 
+            size=5.5) +
+  ylab("Percentage") +
+  xlab("") +
+  ggtitle("Percentage of CpGs annotated to SNPs in \nannotation file or meQTLs in BIOS browser") +
+  th
+```
+
+### Load methylation data for important features
+
+```{r}
+current_ptsd_meth <- read.xlsx("G:/PGC ML/Combined Data/2022-03-30_15-07-11/ElasticNet_Current_ptsd_important_features.xlsx", sheet = 2)
+
+dim(current_ptsd_meth)
+View(head(current_ptsd_meth))
+
+# get only cpgs
+current_cpgs <- current_ptsd_meth %>%
+  select(starts_with('cg'))
+
+dim(current_cpgs)
+```

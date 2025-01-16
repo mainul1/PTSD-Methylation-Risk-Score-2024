@@ -1,0 +1,273 @@
+---
+title: "Compare Effect Sizes"
+author: "Agaz Wani"
+date: "2/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE}
+library(dplyr)
+library(ggplot2)
+library(hrbrthemes)
+```
+
+
+### Code to compare the effect sizes of the discovery and independent cohort. Here methylation is a function of PTSD
+
+```{r}
+disc <- read.csv("../../../Combined Data/2021-11-27_19-16-35/lm_results_testset_ptsd.csv")
+message("dimesion of discovery :")
+dim(disc)
+
+indp <- read.csv("../../Kurt output/VA_MRS/AdditionalResult1/effect_sizes_ptsd_whenEWASPC.csv")
+colnames(indp) <- paste0(colnames(indp), "_indp")
+message("dimesion of independent :")
+dim(indp)
+```
+
+### Merge data
+```{r}
+es_comb <- merge(disc, indp,
+                 by = 1)
+# head(es_comb)
+# View(es_comb)
+```
+
+
+### Count positive and negative directions in discovery and independent cohorts 
+```{r}
+cbind( es_comb %>% count(Estimate < 0),
+       es_comb %>% count(Estimate_indp < 0))
+```
+### Pull out features with same and different directions 
+```{r}
+
+fea_diff_dir <- es_comb %>% 
+  filter(sign(Estimate) != sign(Estimate_indp))
+dim(fea_diff_dir)
+# View(fea_diff_dir)
+
+fea_same_dir <- es_comb %>% 
+  filter(sign(Estimate) == sign(Estimate_indp))
+dim(fea_same_dir)
+# View(fea_diff_dir)
+
+```
+
+
+
+```{r}
+# Horizontal version
+lp_th <- theme(plot.title = element_text(size = 20, hjust = 0.5),
+              axis.title = element_text(size =18),
+              axis.text = element_text(size = 10, face = 'bold'),
+              legend.title = element_text( size = 16),
+              legend.text = element_text(size = 14),
+              panel.grid.major.y = element_blank(),
+              panel.border = element_blank(),
+              axis.ticks.y = element_blank()
+  )
+
+
+line_plot <- function(df, x, y, y1, xlab="", ylab="", title="", legend = TRUE){
+  g <- ggplot(df) +
+    geom_segment( aes_string(x=x, xend=x, y=y, yend=y1), color="grey") +
+    geom_point( aes_string(x=x, y=y, color = "y"), size=4 ) +
+    geom_point( aes_string(x=x, y=y1, color = "y1"), size=4 ) +
+    scale_color_manual(values = c("orange", "deepskyblue4"),
+                       guide  = guide_legend(), 
+                       name   = "Group", 
+                       labels = c("Discovery", "Independent")) +
+    theme_light()
+  
+  if(legend){
+    g <- g + theme(legend.position = "top",
+          panel.border    = element_blank())
+  }else{
+   g <- g +  theme(
+    legend.position = "none",
+  )
+  }
+   g + coord_flip() +
+    ggtitle(title) +
+    lp_th +
+    xlab(paste0(xlab, " (", length(df[[x]]), ")" )) +
+    ylab(ylab)
+}
+```
+
+
+```{r, fig.width=6, fig.height=13}
+fea_diff_dir <- fea_diff_dir %>% 
+   mutate(esmean = mean(c(Estimate, Estimate_indp))) %>%
+  arrange(esmean)
+
+n = ceiling(nrow(fea_diff_dir) / 2)
+nr <- nrow(fea_diff_dir)
+
+df_ls <- split(fea_diff_dir, rep(1:ceiling(nr/n), each=n, length.out=nr))
+lapply(df_ls, dim)
+
+leg <- c(TRUE, FALSE)
+  
+p_ls <- lapply(seq_along(df_ls), function(i){
+    line_plot(df = df_ls[[i]],  x = "Feature", y= "Estimate",
+          y1 =  "Estimate_indp", xlab = "Features",
+          ylab = 'Beta Estimate', legend = leg[i],
+          title = "Feature with different direction")
+})
+
+# p_ls
+
+```
+
+
+```{r, fig.height=14, fig.width=12}
+cowplot::plot_grid(p_ls[[1]], p_ls[[2]])
+```
+### Features with same direction of effect
+```{r, fig.height=13, fig.width=7}
+line_plot(df = fea_same_dir,  x = "Feature", y= "Estimate",
+          y1 =  "Estimate_indp", xlab = "Features",
+          ylab = 'Beta Estimate', legend = TRUE,
+          title = "Feature with same direction")
+```
+
+
+### Now load methylation vs age and smoking results. Here is methylation as a function of age and smoking scores (gender and ancestry mPCs) as covariates 
+```{r}
+disc_age_sm <- local(mget(load("G:/PGC ML/Combined Data/2021-11-27_19-16-35/age_smoking_effect_sizes.Rdata")))
+# names(disc_age_sm)
+lapply(disc_age_sm, dim)
+
+# lapply(disc_age_sm, head)
+```
+
+### Independent cohort
+```{r}
+indp_age_sm <- local(mget(load("G:/PGC ML/RCode/Kurt output/VA_MRS/AdditionalResult1/age_smoking_effect_sizes_whenEWASPC.Rdata")))
+# names(indp_age_sm)
+lapply(indp_age_sm, dim)
+
+# add to col names
+indp_age_sm <- lapply(indp_age_sm, function(x){
+  colnames(x) <- paste0(colnames(x), "_indp")
+  x
+})
+
+# lapply(indp_age_sm, head)
+
+```
+
+### Now merge effect sizes of age and smoking of discovery and independent cohort
+```{r}
+
+comb_age_sm <- Map(function(x, y) merge(x, y, by.x = 1, by.y = 0), disc_age_sm, indp_age_sm)
+lapply(comb_age_sm, dim)
+# lapply(comb_age_sm, head)
+# lapply(comb_age_sm, names)
+```
+
+### How many have positive and negative direction for age and smoking
+```{r}
+lapply(names(comb_age_sm), function(x){
+  print(x)
+  cbind(comb_age_sm[[x]] %>% count(Estimate < 0), 
+        comb_age_sm[[x]] %>% count(Estimate_indp < 0))
+}) 
+```
+
+
+
+### Lets get the cpgs with different direction for age and smoking
+```{r}
+cpgs_wd_dff <- lapply(comb_age_sm, function(x){
+  x %>% 
+  filter(sign(Estimate) != sign(Estimate_indp))
+})
+
+lapply(cpgs_wd_dff, dim)
+```
+
+### Plot effect size of cpgs for age and smoking
+```{r}
+leg1 <- c(TRUE, TRUE, FALSE, FALSE)
+titles <- c("Age", "Age with covariates", "Smoking score", "Smoking score with covariates" )
+
+p_ls_age_sm <- lapply(seq_along(cpgs_wd_dff), function(i){
+    line_plot(df = cpgs_wd_dff[[i]],  x = "Feature", y= "Estimate",
+          y1 =  "Estimate_indp", xlab = "Features",
+          ylab = 'Beta Estimate', legend = leg1[i],
+          title = titles[i] )
+})
+names(p_ls_age_sm) <- names(cpgs_wd_dff)
+
+```
+
+
+```{r, fig.width=12, fig.height=10}
+cowplot::plot_grid(p_ls_age_sm$es_age_covar, p_ls_age_sm$es_smos_covar)
+
+```
+
+### Are there any common cpgs with different direction with covariates 
+```{r}
+message("Common in age and smoking with different directions:")
+table(cpgs_wd_dff$es_age_covar$Feature %in% cpgs_wd_dff$es_smos_covar$Feature)
+```
+
+### Are there any common cpgs with different direction *without* covariates 
+```{r}
+message("Common in age and smoking with different directions:")
+table(cpgs_wd_dff$es_age$Feature %in% cpgs_wd_dff$es_smos$Feature)
+```
+
+
+### Looking at mean methylation for age and smoking
+```{r}
+
+mean_meth_disc <- read.table("G:/PGC ML/RCode/PGCML/data/Linear model age and smoking summary.txt",
+                             fill = T)
+
+mean_meth_indp <- read.table("G:/PGC ML/RCode/Kurt output/VA_MRS/AdditionalResult1/Linear model age and smoking summary_whenEWASPC.txt", fill = T)
+
+
+```
+
+### get age and smoking rows only
+```{r}
+ls_age_sm <- lapply(list(mean_meth_disc,mean_meth_indp), function(x){
+  x %>% filter(grepl("Age|Smo", V1))
+})  
+                           
+new_n <- c("Age", "Age_wd_Covars", "SmoS", "SmoS_wd_Covars")
+ls_age_sm <- lapply(ls_age_sm, function(x){
+  x$V1 <- new_n
+  x <- x[, 1:5]
+  colnames(x) <- c("Feature", 'Estimate', 'Std. Error',  't value', 'Pr(>|t|)')
+  # x$Estimate <- round(x$Estimate, 4)
+  x
+})
+
+names(ls_age_sm) <- c("Disc", "Indp")
+
+# add to the names of indp
+names(ls_age_sm$Indp) <- c("Feature", paste0(colnames(ls_age_sm$Indp[, -1]), "_indp"))
+
+# merge
+comb_meanm_st <- merge(ls_age_sm$Disc, ls_age_sm$Indp, by = 1)
+print(comb_meanm_st[, c(1,2,5,6,9)])
+```
+
+
+```{r, fig.height=5, fig.width=8}
+line_plot(df = comb_meanm_st,  x = "Feature", y= "Estimate",
+          y1 =  "Estimate_indp", xlab = "Features",
+          ylab = 'Beta Estimate', legend = TRUE,
+          title = "Effect size of age and smoking")
+```
+

@@ -1,0 +1,3484 @@
+---
+title: "Downstream analysis"
+author: "Agaz Wani"
+date: "10/25/2021, Last compiled on `r format(Sys.time(), '%d %B, %Y')`"
+format: 
+  html:
+    fig-width: 12
+    fig-height: 6
+    code-fold: false
+---
+
+```{r setup, include=FALSE}
+ # ⌘+⌥+I / Ctrl+Alt+I splits a code chunk.
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Note: Some features have 0 importance in Random Forest, a case when a feature is not used to make a spilit. These features are still important because their presence influences how the splits occur, even if they are not involved in any splits.
+
+#### This version has weights from other approachs (coefficients) to improve the risk scores
+
+### Code to test correlation/association between MRS and PTSD and perform enrichment analysis.
+
+#### ------------------------------------------------
+
+#### Note: This notebook uses important features using (kbest and elastic net approach)
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(ggplot2)
+library(ggsignif)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(cowplot)
+library(data.table)
+library(arrow)
+library(openxlsx)
+library(tibble)
+library(forcats)
+library(grid)
+library(gridExtra)
+```
+
+### risk scores on test set
+
+```{r}
+# 2021-10-02_23-12-43 previous path
+fname <- "G:/PGC ML/Combined Data/2022-03-30_15-07-11/Elasticnet risk scores ptsdpm test data.xlsx"
+
+sheet_names <- getSheetNames(fname)
+
+# function to read all sheets
+read_allsheets <- function(path){
+  sheet_nms <- getSheetNames(path)
+  sheets <- lapply(sheet_nms, read.xlsx, xlsxFile = path)
+  names(sheets) <- sheet_nms
+  return(sheets)
+}
+
+# call function for current and lifetime PTSD
+
+#current
+adj_df <- read_allsheets(path = fname)
+
+# lifetime is in two different files (noncpgs and noncpgsXY)
+feapath <- "G:/PGC ML/Combined Data/2022-03-30_15-07-11/"
+file_ls <- list.files(path = feapath,
+                        pattern = ".csv")
+ptsdlife_file_ls <- file_ls[grepl("^ElasticNet_ptsdlife", file_ls)]
+
+adj_df_life <- lapply(ptsdlife_file_ls, function(x) read.csv(paste0(feapath, x)))
+names(adj_df_life) <- sheet_names
+
+# rename some columns for brevity
+ptsd_old_cols <- c('ptsdpm', 'Traumanum', 'Childhood_Mt')
+ptsd_new_cols <- c('CurrentPTSD', 'TraumaNumber', 'ChildhoodMaltreatment')
+
+# function to rename columns
+replace_names <- function(df, old_cols, new_cols, fac_col){
+  df <- lapply(df, function(x){
+  x <- x %>% dplyr::rename_at(vars(old_cols), ~new_cols)
+  x[[fac_col]] <- as.factor(x[[fac_col]])
+  x
+  })
+  print(fac_col)
+  print(lapply(df, dim))
+  df
+  }
+
+# Current PTSD
+adj_df <- replace_names(adj_df, ptsd_old_cols, ptsd_new_cols, "CurrentPTSD")
+
+# View(adj_df$`Without NonCpGXY Probes`)
+
+
+# Lifetime
+ptsdl_old_cols <- c("PtsdLife", ptsd_old_cols[c(2,3)])
+ptsdl_new_cols <- c('LifetimePTSD', ptsd_new_cols[c(2,3)])
+lifetime_df <- replace_names(adj_df_life, ptsdl_old_cols, ptsdl_new_cols,
+                             'LifetimePTSD')
+
+# lapply(lifetime_df, dim)
+
+```
+
+### After kurt ran the analysis we want to investigate why the direction of effect change between discovery cohots and the replication cohort. We will run stratified test for army and civilian cohorts.
+
+```{r}
+# data from all chorts
+all_cohorts <- read.csv("G:/PGC ML/Pre_Processed Data/2021-11-15_21-41-53/DNHS_GTP_MRS_ArmyS_Prismo_Pheno.csv")
+
+# Now add Ptss and gender information to test sets
+adj_df = lapply(adj_df, function(x){
+  merge(x, all_cohorts[, c("Basename", "Pts_Severity", "Gender", "Study")],
+        by = "Basename")
+})
+lapply(adj_df, dim)
+
+
+lifetime_df = lapply(lifetime_df, function(x){
+  merge(x, all_cohorts[, c("Basename", "Pts_Severity", "Gender", "Study")],
+        by = "Basename")
+})
+lapply(lifetime_df, dim)
+
+
+
+# make a copy of test set for individual analysis for just one dataset
+individual_cohorts_testset <- adj_df$`Without NonCpGXY Probes`
+
+# remove scaled columns from test set for individual cohort analysis for test set
+# individual_cohorts_testset <- individual_cohorts_testset %>%
+#   select(-c("ChildhoodMaltreatment", "TraumaNumber"))
+# 
+# individual_cohorts_testset <- merge(individual_cohorts_testset, 
+#                                     all_cohorts[, c("Basename", 
+#                                                     "Childhood_Mt", 
+#                                                     "Traumanum")],
+#                                     by = "Basename")
+# individual_cohorts_testset <- individual_cohorts_testset %>%
+#   rename(ChildhoodMaltreatment = Childhood_Mt,
+#          TraumaNumber = Traumanum)
+
+
+# remove some columns that we already have
+all_cohorts <- all_cohorts %>% select(-c("Childhood_Mt", "Traumanum"))
+# View(all_cohorts)
+
+
+# Important features for current and lifetime PTSD datasets (both train and test)
+# we need this information to check if we have remitted in lifetime ptsd 
+
+current <- read_allsheets(path = paste0(feapath,
+                                        "ElasticNet_Current_ptsd_important_features.xlsx"))
+
+
+lifetime <- read_allsheets(path = paste0(feapath,
+                                         "ElasticNet_Lifetime_ptsd_important_features.xlsx")) 
+
+# combine current and lifetime to check if we have remitted for lifetime
+cur_life_comn <- merge(all_cohorts,
+                       lifetime$`Without NonCpG Probes`, 
+                       by = "Basename")
+cur_life_comn <- cur_life_comn %>% select(Basename, Ptsdpm, Ptsdlife, Pts_Severity)
+
+dim(cur_life_comn)
+
+# Remitted
+remitted <- cur_life_comn %>% filter(Ptsdpm == 0 & Ptsdlife ==1)
+dim(remitted)
+print(paste0("Remitted samples in lifetime PTSD: ", nrow(remitted)))
+# View(remitted)
+
+
+# important features should match between current and lifetime PTSD
+# one column - current with lifetime PTSD will not match - that is ok 
+table(colnames(current$`Without NonCpG Probes`) == colnames(lifetime$`Without NonCpG Probes`))
+table(colnames(current$`Without NonCpGXY Probes`) == colnames(lifetime$`Without NonCpGXY Probes`))
+
+
+# we need to load the train test set for current ptsd to get gender information
+# This is from earlier version where we had gender as important feature
+train_test <- read.csv("G:/PGC ML/Combined Data/2021-11-27_19-16-35/Current_ptsd_important_features.csv")
+
+# Now combine to get additional helpful information such as basename/gender
+# and order data based on sample ids (i.e Basename)
+current_comb <- lapply(current, function(x){
+  y <- merge(x, all_cohorts, by = "Basename")
+  y <- y[order(match(y$Basename, train_test$Basename)), ]
+} )
+
+
+# Sample ids should match
+table(current$`Without NonCpG Probes`$Basename == train_test$Basename)
+table(current$`Without NonCpGXY Probes`$Basename == train_test$Basename)
+
+# replace old columns with new 
+ptsd_cur_old_cols <- c('current_ptsd', ptsd_old_cols[c(2,3)])
+current_comb <- replace_names(current_comb, ptsd_cur_old_cols, ptsd_new_cols, "CurrentPTSD")
+
+# View(current_comb)
+
+# To get each Army cohort separately. Also get CpGs and important phenotype.
+army_p <- 'Armystarrs|MRS|Prismo'
+cols <- c('cg', 'ch', 'trauma', 
+          'childhood', 'CurrentPTSD', 
+          'LifetimePTSD', "Basename", 
+          "Gender", "Pts_Severity", "Study")
+
+
+# Function to get studies of interest
+filter_study <- function(df, cols, p){
+  if(any(grepl("Current", colnames(df$`Without NonCpG Probes`), ignore.case = T))){
+    print("Current PTSD.....")
+  }else {print("Lifetime PTSD ......")}
+  
+  print(paste("Studies :", p))
+  if(inherits(df, "list")){
+    x <- lapply(df, function(x) x %>% 
+                  filter(grepl(p, Study)) %>%
+                  select(contains(cols)))
+    print(lapply(x, dim))
+  }else{
+    x <- df %>%
+      filter(grepl(p, Study)) %>%
+      select(contains(cols)) 
+    print(dim(x))
+  }
+  x
+}
+
+# get individual cohorts. We will use only the dataset without non-cpg and xy probes 
+individual_cohorts <- current_comb$`Without NonCpGXY Probes` %>% 
+  select(which(grepl("Base|cg|Gender|Childhood|Trauma|CurrentPTSD|Pts_Sev|Study",colnames(.)))) %>%
+  split(f = as.factor(.$Study))
+  
+lapply(individual_cohorts, dim)
+
+
+# individual cohorts form test set
+individual_cohorts_testset <- individual_cohorts_testset %>% 
+  select(which(grepl("Base|cg|Gender|Childhood|Trauma|CurrentPTSD|Pts_Sev|Study",colnames(.)))) %>%
+  split(f = as.factor(.$Study))
+  
+lapply(individual_cohorts_testset, dim)
+
+
+cur_army <- filter_study(current_comb, c(cols, "Study"), army_p)
+# View(cur_army)
+
+
+civ_p <- 'DNHS|GTP'
+cur_civ <- filter_study(current_comb, c(cols, "Study"), civ_p)
+
+
+# lifetime --------------------
+lifetime_comb <- lapply(lifetime, function(x) merge(x, all_cohorts,
+                       by = "Basename"))
+
+lifetime_old_cols <- c('lifetime_ptsd', ptsd_old_cols[c(2,3)])
+lifetime_comb <- replace_names(lifetime_comb, lifetime_old_cols,
+                               ptsdl_new_cols, 'LifetimePTSD')
+
+life_army <- filter_study(lifetime_comb, cols, army_p)
+# View(life_army)
+
+
+life_civ <- filter_study(lifetime_comb, cols, civ_p)
+
+
+# Now to calculate risk scores on both training and test sets
+current_all <- lapply(current_comb, function(x) x %>% select(contains(cols)))
+lapply(current_all, dim)
+
+life_all <- lapply(lifetime_comb, function(x) x%>% select(contains(cols)))
+lapply(life_all, dim)
+```
+
+### Correlation on covariate unadjusted data
+
+```{r}
+# unadj <- arrow::read_feather("G:/PGC ML/Pre_Processed Data/2021-11-15_21-41-53/Imputed_DNHS_GTP_MRS_ArmyS_Prsm.feather")
+```
+
+### To calculate risk scores from data remove the risk scores (in ML python code) and ptsd
+
+```{r}
+# function to remove some columns
+remove_columns <- function(df, cols){
+  if(inherits(df, "list")){
+    x <- lapply(df, function(x) x[, -which(names(x) %in% cols)])
+    print(lapply(x, dim))
+  }else{
+    x <- df[, -which(names(df) %in% cols)]
+    print(dim(x))
+  }
+  x
+}
+
+# calling function
+
+# Columns to remove from current and lifetime ptsd
+rm_cur_cols <- c("risk_score", "Basename", "CurrentPTSD",
+                 "Gender", "Pts_Severity", "Study")
+
+rm_life_cols <- c('LifetimePTSD', 'Basename',
+                  "Gender", "Pts_Severity", "Study")
+
+test_sc <- remove_columns(adj_df, rm_cur_cols)
+
+individual_sc_test <- remove_columns(individual_cohorts_testset,
+                                     c(rm_cur_cols, "Study"))
+
+individual_sc <- remove_columns(individual_cohorts, 
+                                c(rm_cur_cols, "Study"))
+
+army_sc <- remove_columns(cur_army, rm_cur_cols[-1])
+
+civ_sc <- remove_columns(cur_civ, rm_cur_cols[-1])
+
+army_life_sc <- remove_columns(life_army, rm_life_cols)
+
+test_life_sc <- remove_columns(lifetime_df, rm_life_cols)
+
+current_all_sc <- remove_columns(current_all, rm_cur_cols[-1])
+```
+
+### function to scale the data between 0-1
+
+```{r}
+maxmin <- function(x, na.rm=TRUE){
+  if(is.vector(x)==TRUE){
+    maxs <- max(x, na.rm = na.rm)
+    mins <- min(x, na.rm = na.rm)
+    scale(x,center=mins,scale=maxs-mins)
+  } else {
+    maxs <- apply(x, 2,max, na.rm= na.rm)
+    mins <- apply(x, 2,min, na.rm = na.rm)
+    scale(x, center = mins, scale = maxs - mins)
+  }
+}
+
+```
+
+### We will scale trauma and childhoodmaltreatment columns
+
+```{r}
+scale_cols <- c("TraumaNumber", "ChildhoodMaltreatment")
+
+# current
+scale_data <- function(df, cols){
+  
+  # get the columns with unique values, for e.g in ArmyStarrs cohort 
+  # all trauma values are one, so don't scale that 
+  # so we need to remove such columns before scaling
+  
+  col_wd_unq_vals <- lapply(df[, cols], function(x) x[length(unique(x)) == 1])
+  col_wd_unq_vals <- Filter(length, col_wd_unq_vals)
+  col_wd_unq_vals <- names(col_wd_unq_vals)
+  
+  cols <- cols[!cols %in% col_wd_unq_vals]
+  
+  cat("Scaling columns:", cols, "\n")
+  
+  scale_df <- df[, which(names(df) %in% (cols)), TRUE]
+  scale_df <- data.frame(maxmin(x = scale_df, na.rm = TRUE))
+  
+  # code to handle one column
+  if(ncol(scale_df) ==1){
+    colnames(scale_df) <- cols
+  }else{
+    scale_df <- scale_df[, match(colnames(scale_df), cols)]
+    # check if cols are in order before renaming
+    
+    if(all(colnames(scale_df) == cols)){
+      print("columns in order")
+      colnames(scale_df) <- cols
+      }else{stop("columns are NOT in order")}
+    }
+  
+ 
+  
+  other_df <- df[, -which(names(df) %in% (cols)), TRUE]
+  x <- cbind(other_df, scale_df)
+}
+
+scale_data_helper <- function(df,  cols){
+  if(inherits(df, "list")){
+    x <- lapply(df, function(x) scale_data(x, cols))
+    print(lapply(x, dim))
+  }else{
+    x <- scale_data(df, cols)
+    print(dim(x))
+  }
+  x
+}
+
+adj_sc_df <- scale_data_helper(test_sc, scale_cols)
+# View(adj_sc_df)
+#----------
+
+ind_sc_df_test <- scale_data_helper(individual_sc_test, scale_cols)
+
+ind_sc_df <- scale_data_helper(individual_sc, scale_cols)
+View(ind_sc_df$Armystarrs)
+
+# army
+army_sc_df <- scale_data_helper(army_sc, scale_cols)
+# View(army_sc_df$`Without NonCpG Probes`)
+
+# lifetime
+# army_life_sc_df <- scale_data_helper(army_life_sc, scale_cols[2])
+# View(army_life_sc_df)
+
+adj_life_sc_df <- scale_data_helper(test_life_sc, scale_cols)
+# View(adj_life_sc_df)
+
+
+# all data
+cur_sc_df <- scale_data_helper(current_all_sc, scale_cols)
+# View(cur_sc_df)
+
+```
+
+### Now calculate risk scores
+
+```{r}
+# load feature importance
+weights_file_ls <- file_ls[grepl("EN_selected_wd_EN_l1_r_0.1", file_ls)]
+
+weightsWoExpVar <- file_ls[grepl("EN_WO_Exposure_Vars_selected_wd_EN_l1_r_0.1", file_ls)]
+
+# add feature weights from model without exposure variables
+weights <- lapply(c(weights_file_ls, weightsWoExpVar) , function(x) read.csv(paste0(feapath, x)))
+
+sheet_names_new <- c(sheet_names, paste0(sheet_names[2], "WoExpVar"))
+
+names(weights) <- sheet_names_new
+lapply(weights,dim)
+
+
+
+# check how many have zero weight
+zero_weig <- weights$`Without NonCpGXY Probes` %>%
+  filter(Importance == 0)
+dim(zero_weig)
+
+non_zero_weig <- weights$`Without NonCpGXY Probes` %>%
+  filter(Importance != 0)
+View(non_zero_weig)
+
+# Save weights in one .xls sheet for sharing to run on independent cohorts
+# write.xlsx(weights, "../../../Combined Data/2022-03-30_15-07-11/EN_selected_wd_EN_l1_r_0.1.xlsx",
+#            rowNames = FALSE)
+
+# weights <- read.csv("G:/PGC ML/Combined Data/2021-11-27_19-16-35/Important_features.csv")
+
+
+# lets get the mean and std deviation of risk scores
+comn_features <- lapply(weights, function(x){
+  x[which(x$`Feature` %in%  weights$`Without NonCpGXY ProbesWoExpVar`$Feature), ]
+})
+
+lapply(comn_features, dim)
+
+mean_sd <- lapply(comn_features, function(x) summary(x[, 2]))
+mean_sd
+
+
+# Function to rename some rows 
+rename_importance_rows <- function(weights_df){
+  weights_df$Feature <- ifelse(weights_df$Feature == 'Traumanum', 'TraumaNumber',
+                      ifelse(weights_df$Feature == 'Childhood_Mt',
+                             'ChildhoodMaltreatment', weights_df$Feature))
+  weights_df
+}
+
+rename_importance_rows_helper <- function(weights_df){
+  if (inherits(weights_df, "list")){
+    x <- lapply(weights_df, function(x) rename_importance_rows(x))
+    print(lapply(x, dim))
+  }else{
+    x <- rename_importance_rows(weights_df)
+    print(dim(x))
+    }
+  x
+}
+
+weights <- rename_importance_rows_helper(weights_df = weights)
+
+# lets add df for without trauma and childhood maltreatment variables
+adj_sc_df$`Without NonCpGXY ProbesWoExpVar` <- adj_sc_df$`Without NonCpGXY Probes`
+
+# %>%
+#   select(-c(TraumaNumber, ChildhoodMaltreatment))
+
+# current - check order
+Map((function(x, y) table(colnames(x) == y$Feature)), adj_sc_df, weights)
+
+
+# get features with negative and positive coefficients separately
+neg_weights <- lapply(weights, function(x) x[x$Importance < 0, ])
+lapply(neg_weights, dim)
+
+pos_weights <- lapply(weights, function(x) x[x$Importance > 0, ])
+lapply(pos_weights, dim)
+
+# now get the features from test dataset
+adj_sc_df_neg <- Map((function(x,y) x[, colnames(x) %in% y$Feature]),
+                     adj_sc_df, neg_weights)
+lapply(adj_sc_df_neg, dim)
+
+adj_sc_df_pos <- Map((function(x,y) x[, colnames(x) %in% y$Feature]), 
+                     adj_sc_df, pos_weights)
+
+lapply(adj_sc_df_pos, dim)
+
+
+# function to calculate risk scores. 
+# It will check order of columns first and the calculate risk scores
+calculate_score <- function(df, weights, additional_cols_df, 
+                            add_col, sheet_names = sheet_names){
+  
+  if(inherits(df, "list")){
+    x <- lapply(seq_along(df), function(i) {
+      
+      # check if weights is a list or not and take appropriate action
+      if(inherits(weights, "list")){
+        weights_df = weights[[i]]
+      }else{weights_df = weights}
+      
+        comn_vars <- df[[i]][, which(colnames(df[[i]]) %in% weights_df$Feature)]
+        ord <- comn_vars[, order(match(colnames(comn_vars), weights_df$Feature))]
+        
+        # check if we have trauma and childhood in the df
+        # it will be in case when we have weights from methylation data only
+        # if the cols exist, we will still add them to get correlation
+        not_comn_vars <- colnames(df[[i]])[which(!colnames(df[[i]]) %in% weights_df$Feature)]
+        
+        if(!identical(not_comn_vars, character(0))){
+          more_cols <- not_comn_vars[which(not_comn_vars %in% colnames(df[[i]]))]
+          add_col <- c(add_col, more_cols)
+        
+        }
+          
+      
+      # we don't need to run this for df with no exposure variables
+      if("TraumaNumber" %in% weights_df$Feature){
+        print(paste("Ordered: ", table(colnames(ord) == weights_df$Feature),
+                    collapse = '\n'))
+        s <- apply(ord, 1, function(x) sum(x * weights_df$Importance, na.rm = TRUE))
+        ord[['risk_score']] <- s
+      }
+      
+      
+      # meth only risk scores
+      meth_fea_weights <- weights_df %>%
+        filter(grepl("^cg|^ch.", Feature))
+      
+      df_x <- df[[i]]
+      meth <- df_x[, which(colnames(df_x) %in% meth_fea_weights$Feature)]
+      
+      ord_meth <- meth[, order(match(colnames(meth),meth_fea_weights$Feature))]
+      
+      print(paste("Ordered: ", 
+                  table(colnames(ord_meth) ==
+                          meth_fea_weights$Feature),collapse = '\n'))
+      
+      s_meth <- apply(ord_meth, 1, function(x) sum(x * meth_fea_weights$Importance, na.rm = TRUE))
+      
+      ord[['meth_only_risk_score']] <- s_meth 
+      
+      
+       # check if from df is a list
+      if(inherits(additional_cols_df, "list")){
+        from_df <- additional_cols_df[[i]] 
+      }else{
+        from_df <- additional_cols_df
+      }
+      
+      
+      if(length(add_col) > 1){
+        ord[add_col] <- from_df[add_col]
+      }else{
+        ord[[add_col]] <- from_df[[add_col]]
+      }
+        
+      ord
+      })
+    names(x) <- sheet_names
+    x
+  }else{
+    from_df = additional_cols_df
+    comn_vars <- df[, which(colnames(df) %in% weights_df$Feature)]
+    ord <- comn_vars[, order(match(colnames(comn_vars),weights$Feature))]
+    print(paste("Ordered", table(colnames(ord) == weights$Feature)))
+    s <- apply(ord, 1, function(x) sum(x * weights$Importance))
+   ord[['risk_score']] <- s
+   
+   if(length(add_col) > 1){
+        ord[add_col] <- from_df[add_col]
+      }else{
+        ord[[add_col]] <- from_df[[add_col]]
+      }
+   ord
+  }
+}
+
+add_cur_cols <- rm_cur_cols[-1]
+
+adj_sc_df <- calculate_score(adj_sc_df, weights,
+                             adj_df$`Without NonCpG Probes`, 
+                             add_col = add_cur_cols,
+                             sheet_names_new)
+
+adj_sc_df_neg <- calculate_score(adj_sc_df_neg, neg_weights,
+                             adj_df$`Without NonCpG Probes`, 
+                             add_col = add_cur_cols, 
+                             sheet_names_new)
+
+adj_sc_df_pos <- calculate_score(adj_sc_df_pos, pos_weights,
+                             adj_df$`Without NonCpG Probes`, 
+                             add_col = add_cur_cols, 
+                             sheet_names_new)
+
+
+# Individual cohorts
+ind_sc_df_wd_score <- calculate_score(ind_sc_df, 
+                             weights$`Without NonCpGXY Probes`,
+                             individual_cohorts, 
+                             add_col = add_cur_cols, 
+                             sheet_names = names(individual_cohorts))
+
+ind_sc_df_wo_exp_in_model <- calculate_score(ind_sc_df, 
+                                             weights$`Without NonCpGXY ProbesWoExpVar`,
+                                             individual_cohorts, 
+                                             add_col = add_cur_cols, 
+                                             sheet_names = names(individual_cohorts))
+
+
+# Individual cohorts in test set only
+ind_sc_df_test_wd_score <- calculate_score(ind_sc_df_test, 
+                                           weights$`Without NonCpGXY Probes`,
+                                           individual_cohorts_testset, 
+                                           add_col = add_cur_cols, 
+                                           sheet_names = names(individual_cohorts))
+
+ind_sc_df_test_wo_exp_in_model <- calculate_score(ind_sc_df_test, 
+                                                  weights$`Without NonCpGXY ProbesWoExpVar`,
+                                                  individual_cohorts_testset, 
+                                                  add_col = add_cur_cols, 
+                                                  sheet_names = names(individual_cohorts))
+
+
+# Army ---------------
+army_sc_df <- calculate_score(army_sc_df, weights,
+                         cur_army$`Without NonCpG Probes`, 
+                         add_col = add_cur_cols,
+                         sheet_names)
+
+
+# lifetime
+
+# army_life_sc_df = order_data(army_life_sc_df)
+# table(colnames(army_life_sc_df) == weights$Feature)
+# army_life_sc_df$risk_score <- calculate_score(army_life_sc_df)
+# army_life_sc_df$LifetimePTSD <- army_life_sc_df$LifetimePTSD
+
+add_life_cols <- rm_life_cols
+adj_life_sc_df <- calculate_score(adj_life_sc_df, weights,
+                         lifetime_df$`Without NonCpG Probes`, 
+                         add_col = add_life_cols, 
+                         sheet_names)
+
+# all
+cur_sc_df <- calculate_score(cur_sc_df, weights,
+                         current_all$`Without NonCpG Probes`, 
+                         add_col = add_cur_cols, 
+                         sheet_names)
+
+
+```
+
+### calculate mean methylation of samples for significant cpgs
+
+```{r}
+cpg_p <- c("cg", "ch.") # pattern
+
+# Function to calculate mean
+calculate_mean <- function(df, p){
+  if(inherits(df, "list")){
+    df <- lapply(df, function(x) {
+      x %>% mutate(mean_meth = rowMeans(select(., starts_with(cpg_p))))
+      })
+  }else{
+    df <- df %>% mutate(mean_meth = rowMeans(select(., starts_with(cpg_p))))
+  }
+  
+}
+
+adj_df <- calculate_mean(adj_df, cpg_p)
+
+adj_sc_df <- calculate_mean(adj_sc_df, cpg_p)
+
+adj_sc_df_neg <- calculate_mean(adj_sc_df_neg, cpg_p)
+
+adj_sc_df_pos <- calculate_mean(adj_sc_df_pos, cpg_p)
+
+ind_sc_df_test_wd_score <- calculate_mean(ind_sc_df_test_wd_score, cpg_p)
+
+ind_sc_df_test_wo_exp_in_model <- calculate_mean(ind_sc_df_test_wo_exp_in_model, cpg_p)
+
+ind_sc_df_wd_score <- calculate_mean(ind_sc_df_wd_score, cpg_p)
+
+ind_sc_df_wo_exp_in_model <- calculate_mean(ind_sc_df_wo_exp_in_model, cpg_p)
+
+army_sc_df <- calculate_mean(army_sc_df, cpg_p)
+
+# army_life_sc_df <- calculate_mean(army_life_sc_df, cpg_p)
+
+adj_life_sc_df <- calculate_mean(adj_life_sc_df, cpg_p)
+
+cur_sc_df <- calculate_mean(cur_sc_df, cpg_p)
+
+# save scaled data to plot together with adjusted exposure dataset
+write.xlsx(adj_sc_df, file = "../data/Covariate adjusted and scaled data.xlsx")
+  
+```
+
+### Correlation plot
+
+```{r, fig.width=12, fig.height=6}
+# correlation columns
+cols <- c("TraumaNumber", "ChildhoodMaltreatment", "risk_score", 
+          "meth_only_risk_score", "CurrentPTSD", "mean_meth")
+
+cols_life <- c(cols[1:4], "LifetimePTSD", cols[6])
+
+new_names <- c("Cumulative trauma", "Childhood maltreatment", 
+               "Risk score", "Meth Risk score",
+               "Current PTSD", "Mean methylation")
+
+new_names_life <- c(new_names[1:4], "Lifetime PTSD", new_names[6])
+
+```
+
+## Function to get correlation and adjusted pvalue. Input is data frame, columns we want to get correlation for and new names to assign for columns.
+
+```{r}
+get_correlation <- function(df, cols, new_names){
+  
+  # As we have many dfs, lets check which cols are present
+  # and use those cols
+  cols_present <- which(cols %in% colnames(df))
+  cols <- cols[cols_present]
+  new_names <- new_names[cols_present]
+  
+  # get the cols from df and correlation
+  df <- df %>% select(cols)
+  indx <- sapply(df, is.factor)
+  df[indx] <- lapply(df[indx], function(x) as.numeric(as.character(x)))
+  colnames(df) <- new_names
+  cor_df <- cor(df)
+  p = cor.mtest(df, conf.level = 0.95) # added na.rm 
+
+  # adjusted pvalues
+  p_adj <- matrix(p.adjust(as.vector(as.matrix(p$p)),
+                           method='fdr'),
+                  ncol=ncol(cor_df))
+  rownames(p_adj) <- new_names
+  colnames(p_adj) <- new_names
+
+  df_ls <- list(cor_df, p_adj, p$p)
+  names(df_ls) <- c("cor", "padj", "pval")
+  return(df_ls)
+}
+
+get_correlation_helper <- function(df, cols, new_names){
+  if (inherits(df, "list")) {
+    x_cor <- lapply(df, function(x) get_correlation(x, cols, new_names))
+  }else{
+    x_cor <- get_correlation(df, cols, new_names)
+  }
+  x_cor
+}
+
+# color palette
+colrs <- colorRampPalette(c("#0072B5FF", '#7F0000',
+                            '#FF7F00', 'orange',
+                            'cyan', '#007FFF', 'blue', '#00007F',
+                            "#BC3C29FF"))
+```
+
+## Now call the function to get correlation for data
+
+```{r, fig.width=6, fig.height=4}
+# covariate adjusted data
+dfs <- list(adj_sc_df, 
+            ind_sc_df_test_wd_score, 
+            ind_sc_df_test_wo_exp_in_model, 
+            ind_sc_df_wd_score,
+            ind_sc_df_wo_exp_in_model,
+            army_sc_df, 
+            cur_sc_df,
+            adj_life_sc_df)
+
+dfs_names <- c('Test set Current PTSD scaled', 
+               'Individual Cohorts Test',
+               'Individual Cohorts Test Wo Exp in Model',
+               'Individual Cohorts',
+               'Individual Cohorts Wo Exp in Model', 
+               'Army cohorts', 
+               "All cohorts",
+               'Test set Lifetime PTSD')
+
+
+# dfs <- list(adj_sc_df, ind_sc_df, army_sc_df, adj_life_sc_df)
+# dfs_names <- c('Test set Current PTSD scaled',  
+#                "Individual Cohorts", 'Army cohorts', 'Test set Lifetime PTSD')
+
+cor_dfs <- lapply(seq_along(dfs), function(i){
+  if(i %in% c(1,2,3,4,5,6, 7)){
+    print("Processing ...", i)
+    get_correlation_helper(df = dfs[[i]], cols = cols,
+                           new_names = new_names)
+  }else{
+    get_correlation_helper(df = dfs[[i]], cols = cols_life,                 
+                           new_names = new_names_life)
+  }
+})
+names(cor_dfs) <- dfs_names
+print(names(cor_dfs))
+
+
+# to test correlation between a contineous and binary variable
+# Point-Biserial is the appropriate approach but the assumption is the 
+# contineous variable is normally distributed 
+# so let check that
+# -------------------------------
+library("ggpubr")
+
+# density
+ggdensity(adj_sc_df$`Without NonCpG Probes`[["risk_score"]], 
+          fill = "lightgray")
+ggdensity(adj_sc_df$`Without NonCpG Probes`[["meth_only_risk_score"]], 
+          fill = "lightgray")
+
+# point should be on the straight line for linear relationship
+ggqqplot(adj_sc_df$`Without NonCpGXY Probes`[["risk_score"]], ylab = "risk_score")
+# normality test
+
+cols_biserial <- cols[c(1:4, 6)]
+
+# also perform a normality test 
+shapiro.test(adj_sc_df$`Without NonCpGXY Probes`[["risk_score"]])
+shapiro.test(adj_sc_df$`Without NonCpGXY Probes`[["meth_only_risk_score"]])
+shapiro.test(adj_sc_df$`Without NonCpGXY ProbesWoExpVar`[["meth_only_risk_score"]])
+shapiro.test(adj_sc_df$`Without NonCpG Probes`[["TraumaNumber"]])
+
+shapiro.test(adj_sc_df$`Without NonCpGXY Probes`[, cols[c(1:4)]])
+
+# lets look at the correlation using point biserial approach and see if there is any 
+# difference with correlation using cor function
+
+biserial_cor <- lapply(adj_sc_df, function(x){ # loop over dfs
+  cols_biserial <- cols_biserial[which(cols_biserial %in% colnames(x))]
+  res <- lapply(cols_biserial, function(y){ # loop over cols
+    xcol <- 'CurrentPTSD'
+    ycol <- y
+    x1 <- x[[xcol]]
+    x1 <- as.numeric(levels(x1))[x1]
+    y <- x[[ycol]]
+    bc <- cor.test(y, x1)
+    res <- list(bc$estimate, bc$p.value, bc$statistic)
+    names(res) <- c('CurrentPTSD cor', 'p.val', 't')
+    res <- do.call(cbind, res)
+    rownames(res) <- ycol
+    res
+    })
+  do.call(rbind, res)
+})
+cor_dfs$`Test set Current PTSD`$`Without NonCpG Probes`$cor
+cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY Probes`$cor
+cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY ProbesWoExpVar`$cor
+
+
+
+# Save correlation information
+df_n <- "Test set Current PTSD scaled"
+
+list_of_datasets <- list("nonCpG Cor" = cor_dfs$`Test set Current PTSD scaled`$`Without NonCpG Probes`$cor,
+                         "nonCpG Padj" = cor_dfs$`Test set Current PTSD scaled`$`Without NonCpG Probes`$padj,
+                         "nonCpGXY Cor" = cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY Probes`$cor,
+                         "nonCpGXY Padj" = cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY Probes`$padj)
+
+# write.xlsx(list_of_datasets, file = "../data/Correlation_EN_lr_0.1.xlsx", rowNames = T)
+
+# write.xlsx(cor_dfs$`Independent Cohorts`, file = "../data/Correlation_EN_lr_0.1_independent_cohorts.xlsx", rowNames = T)
+
+# cor_army_life_df <- get_correlation(df = army_life_sc_df, cols = cols_life,
+#                                 new_names = new_names_life)
+
+# Function to get correlation between different variables
+correlation_plot <- function(cor_df, pval_name, title){
+  pval = cor_df[[pval_name]]
+  corrplot(cor_df$cor,
+  p.mat = pval,
+  diag = TRUE, method = "pie",
+  type = "upper",  number.cex = 0.8,
+  tl.col = "black", tl.srt = 45,
+  tl.cex = 1.2, cl.cex = 1.2,
+  sig.level = c(0.001, 0.01, 0.05),
+  pch.cex = 1.4,insig = 'label_sig',
+  cl.ratio = 0.4,
+  mar = c(0,0,2,0),
+  col = colrs(10),
+  title = title)
+  recordPlot()
+}
+
+
+# Helper function to get correlation between variable. 
+# It will run the above correlation function for all the data 
+correlation_plot_helper <- function(cor_df, pval_name, title){
+  if(inherits(cor_df, "list")){
+    n <- names(cor_dfs)
+    p <- lapply(seq_along(cor_df), function(i) {
+      if(inherits(cor_df[[i]], "list")){
+        # print(cor_df[[i]])
+        n1 <- names(cor_df[[i]])
+        p1 <- lapply(seq_along(cor_df[[i]]), function(j){
+          correlation_plot(cor_df[[i]][[j]], pval_name,
+                           title = paste0(n[i], ":\n",n1[j]))
+          
+        })
+        names(p1) <- n1
+        p1
+      }else{
+        p <- correlation_plot(cor_df[[i]], pval_name, title = n[i])
+      }
+    })
+    names(p) <- n
+    p
+    }else{
+    p <- correlation_plot(x, pval_name, title = title)
+    }
+}
+
+# correlation is FDR corrected with "padj"
+p_adj <- correlation_plot_helper(cor_dfs, "padj", title = '')
+# p_adj$`Test set Current PTSD`$`Without NonCpG Probes`
+
+
+# plot_grid(p_adj$`Test set Current PTSD`$`Without NonCpG Probes`, NULL, 
+#           p_adj$`Test set Current PTSD`$`Without NonCpGXY Probes`, rel_widths = c(1,0.1,1),
+#           labels = c('A', '', 'B'), align = "hv", nrow = 1)
+
+
+```
+
+### Plot correlation with nominally pvalue
+
+```{r}
+
+cor_p_nominal <- correlation_plot_helper(cor_dfs, "pval", title = '')
+
+```
+
+```{r}
+#| fig-width: 14
+#| fig-height: 6
+
+plot_grid(p_adj$`Test set Current PTSD scaled`$`Without NonCpG Probes`, NULL, 
+          p_adj$`Test set Current PTSD scaled`$`Without NonCpGXY Probes`, rel_widths = c(1,0.1,1),
+          labels = c('A', '', 'B'), align = "hv", nrow = 1)
+
+
+plot_grid(p_adj$`Army cohorts`$`Without NonCpG Probes`, NULL, 
+          p_adj$`Army cohorts`$`Without NonCpGXY Probes`, rel_widths = c(1,0.1,1),
+          labels = c('A', '', 'B'), align = "hv", nrow = 1)
+
+plot_grid(p_adj$`Test set Lifetime PTSD`$`Without NonCpG Probes`, NULL, 
+          p_adj$`Test set Lifetime PTSD`$`Without NonCpGXY Probes`, rel_widths = c(1,0.1,1),
+          labels = c('A', '', 'B'), align = "hv", nrow = 1)
+```
+
+### Plot Individual Cohorts in one plot
+
+```{r, fig.height=14, fig.width=12}
+
+plot_grid(plotlist = p_adj$`Individual Cohorts`[1:4],
+          nrow = 2)
+
+plot_grid(p_adj$`Individual Cohorts`$Armystarrs, NULL,
+          p_adj$`Individual Cohorts`$DNHS, rel_widths = c(1,0.1,1),
+          nrow = 1)
+
+```
+
+### Plot for ISTSS. Printing plot twice for same condition.
+
+```{r}
+correlation_plot(cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY Probes`,
+                 'padj',
+                 title = '')
+
+
+# without exposure variables in the model
+correlation_plot(cor_dfs$`Test set Current PTSD scaled`$`Without NonCpGXY ProbesWoExpVar`,
+                 'padj',
+                 title = 'Without exposures in model')
+```
+
+### Theme and linear model plot function
+
+```{r}
+# theme setting
+th <-   theme(plot.title = element_text(size = 17, hjust = 0.5),
+              axis.title = element_text(size =15),
+              axis.text = element_text(size = 13),
+              legend.title = element_text( size = 15),
+              legend.text = element_text(size = 13))
+
+
+# function to plot with lm line
+lm_plot <- function(df, x, y, xlab, ylab, title, group='ptsdpm',
+                    model = 'full', legend='', fig_legend = TRUE){
+  if (model == 'full'){
+    p <- ggplot(df,aes_string(x, y)) +
+      geom_point( color="blue", size = 3) +
+      geom_smooth(method='lm', linetype="dashed",
+                  color="darkred", fill="blue", size = 1.5)
+  }else{
+    p <- ggplot(df,aes_string(x, y, color = group)) +
+      geom_point( size = 3) 
+    
+    if(fig_legend){
+      print("=================")
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+    }else{
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        theme(legend.position = 'none')+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+      
+    }
+
+
+  }
+
+  p <- p + ggtitle(title)+
+    xlab(xlab) +
+    ylab(ylab) +
+    theme_classic()+
+    th
+  
+  if(!fig_legend){
+    p <- p + theme(legend.position = 'none')
+  }else p
+}
+
+
+```
+
+# linear model
+
+```{r}
+
+# sink("G:/PGC ML/Combined Data/2022-03-30_15-07-11/Linear model PTSD summary_coeff_as_weights_selected_wd_EN_lr_0.1.txt")
+
+lm_helper <- function(df, f){
+  print("=====================================================")
+  analy <- paste(c(
+    paste(c("Data frame", deparse(substitute(df))), collapse = ':'),
+    paste(c("Formula", f), collapse = ':')), collapse = ', ')
+  print(analy)
+  if(inherits(df, "list")){
+    n <- names(df)
+    lmr <- lapply(seq_along(df), function(i){
+      x <- lm(f, data = df[[i]])
+      print(n[i])
+      print(summary(x))
+      x
+    }) 
+  }else{
+    lmr <- lm(f, data = df)
+     print(summary(lmr))
+    lmr
+  }
+}
+
+
+# Logistic regression model, risk scores predicting PTSD
+
+logit_helper <- function(df, f){
+  print("=====================================================")
+  analy <- paste(c(
+    paste(c("Data frame", deparse(substitute(df))), collapse = ':'),
+    paste(c("Formula", f), collapse = ':')), collapse = ', ')
+  print(analy)
+  if(inherits(df, "list")){
+    n <- names(df)
+    logit <- lapply(seq_along(df), function(i){
+      x <- glm(f, data = df[[i]], family = "binomial")
+      print(n[i])
+      print(summary(x))
+      x
+    }) 
+  }else{
+    logit <- x <- glm(f, data = df[[i]], family = "binomial")
+     print(summary(logit))
+    logit
+  }
+}
+
+
+# formula for logistic regression model
+f_ptsd_logit <- as.formula(paste('CurrentPTSD~', 'risk_score')) 
+f_ptsd_logit_meth <- as.formula(paste('CurrentPTSD~', 'meth_only_risk_score')) 
+
+f_life_logit <- as.formula(paste('LifetimePTSD~', 'risk_score'))
+
+f_life_logit_meth <- as.formula(paste('LifetimePTSD~', 'meth_only_risk_score'))
+
+# risk scores Vs. current PTSD
+logit_ptsd <- logit_helper(df = adj_sc_df, f = f_ptsd_logit)
+lapply(logit_adj_meth, function(x) confint(x))
+
+
+# PTSD formula
+f_cur_ptsd <- as.formula(paste('risk_score~', 'CurrentPTSD'))
+f_life_ptsd <- as.formula(paste('risk_score~', 'LifetimePTSD'))
+f_ptsd <- as.formula(paste('as.numeric(CurrentPTSD)~', 'risk_score'))
+
+f_cur_ptsd_meth <- as.formula(paste('meth_only_risk_score~', 'CurrentPTSD'))
+
+# PTSS formula
+f_ptss <- as.formula(paste('risk_score~', 'Pts_Severity'))
+f_ptss_meth <- as.formula(paste('meth_only_risk_score~', 'Pts_Severity'))
+
+# current PTSD
+# lmr_adj <- lm_helper(df = adj_df, f = f_cur_ptsd)
+
+# for first two where we have risk scores
+lmr_scaled <- lm_helper( df = adj_sc_df[1:2], f = f_cur_ptsd)
+
+# third where we have meth risk scores only
+lmr_scaled_wo_exp_in_model <- lm_helper( df = adj_sc_df[3], f = f_cur_ptsd_meth)
+
+lmr_indep <- lm_helper(df= ind_sc_df_wd_score, f = f_cur_ptsd)
+lmr_indep_meth <- lm_helper(df= ind_sc_df_wd_score, f = f_cur_ptsd_meth)
+lmr_indep_test <- lm_helper(df= ind_sc_df_test_wd_score, f = f_cur_ptsd)
+lmr_indep_meth_test <- lm_helper(df= ind_sc_df_test_wd_score, f = f_cur_ptsd_meth)
+
+lmr_indep_wo_exp_in_model <- lm_helper(df= ind_sc_df_wo_exp_in_model, f = f_cur_ptsd_meth)
+
+lmr_ind_ptsd <- lm_helper(df= ind_sc_df_wd_score, f = f_ptsd)
+
+lmr_meth <- lm_helper( df = adj_sc_df, f = f_cur_ptsd_meth)
+
+lmr_ptsd <- lm_helper( df = adj_sc_df[1:2], f = f_ptsd)
+
+lmr_scaled_ptss <- lm_helper( df = adj_sc_df[1:2], f = f_ptss)
+
+lmr_scaled_ptss_wo_exp_in_model <- lm_helper( df = adj_sc_df[3], f = f_ptss_meth)
+
+lmr_meth_ptss <- lm_helper( df = adj_sc_df[1:2], f = f_ptss)
+
+lmr_army <- lm_helper(df = army_sc_df, f = f_cur_ptsd)
+
+lmr_scaled_life <- lm_helper(adj_life_sc_df, f = f_life_ptsd)
+
+
+# association between mean methylation in datasets with 
+# positive and negative coefficients
+f_pos = as.formula(paste('mean_meth~', 'CurrentPTSD'))
+
+lmr_pos = lm_helper(adj_sc_df_pos, f_pos)
+
+lmr_neg = lm_helper(adj_sc_df_neg, f_pos)
+
+# risk scores vs mean methylation
+f_rc <- as.formula(paste('mean_meth~', 'risk_score'))
+
+lmr_meth_sc <- lm_helper(df = adj_sc_df[1:2], f =f_rc)
+
+
+# cumulative trauma vs mean methylation
+f_trma <- as.formula(paste('mean_meth~', 'TraumaNumber'))
+
+lmr_ct_meth_sc <- lm_helper(df = adj_sc_df[1:2], f_trma)
+
+
+# childhood maltreatment vs mean methylation
+f_ch_trma <- as.formula(paste('mean_meth~', 'ChildhoodMaltreatment'))
+
+lmr_chd_meth_sc <- lm_helper(df = adj_sc_df[1:2], f_ch_trma)
+
+# sink()
+
+```
+
+# lm for mean methylation and risk scores
+
+```{r}
+p_meth_adj_sep <- lm_plot(df = adj_sc_df$`Without NonCpG Probes`, 
+                          x = 'risk_score',
+                          y = 'mean_meth',
+                          xlab = "Risk score",
+                          ylab  = "Mean methylation",
+                          model = 'seperate',
+                          group = "CurrentPTSD",
+                          fig_legend = FALSE,
+                          legend = '',
+                          title = "Test set adjusted and scaled: \n Without NonCpG Probes")
+
+
+p_meth_adj_sep1 <- lm_plot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                           x = 'risk_score',
+                           y = 'mean_meth',
+                           xlab  = "Risk score",
+                           ylab = "",
+                           model = 'seperate',
+                           group = "CurrentPTSD",
+                           fig_legend = TRUE,
+                           legend = 'Current PTSD',
+                           title = "Test set adjusted and scaled: \n Without NonCpGXY Probes")
+
+# p_meth_adj_sep
+
+
+# -----------------------
+p_meth_adj_ptss <- lm_plot(df = adj_sc_df$`Without NonCpG Probes`, x = 'risk_score',
+                          y = 'Pts_Severity',
+                          xlab = "Risk score",
+                          ylab  = "PTSS",
+                          model = 'seperate',
+                          group = "CurrentPTSD",
+                          fig_legend = FALSE,
+                          legend = '',
+                          title = "Test set adjusted and scaled: \n Without NonCpG Probes")
+
+
+p_meth_adj_ptss1 <- lm_plot(df = adj_sc_df$`Without NonCpGXY Probes`, x = 'risk_score',
+                          y = 'Pts_Severity',
+                          xlab  = "Risk score",
+                          ylab = "",
+                          model = 'seperate',
+                          group = "CurrentPTSD",
+                          fig_legend = TRUE,
+                          legend = 'Current PTSD',
+                          title = "Test set adjusted and scaled: \n Without NonCpGXY Probes")
+
+
+plot_grid(p_meth_adj_sep, p_meth_adj_sep1, 
+          rel_widths = c(1.5, 2),
+           labels = 'AUTO'
+          )
+
+plot_grid(p_meth_adj_ptss, p_meth_adj_ptss1,
+          rel_widths = c(1.5, 2),
+           labels = 'AUTO'
+          )
+
+# plot_grid(p_meth_sep, p_meth_adj_sep, 
+#           p_meth_sep_l, p_meth_adj_sep_l, labels = 'AUTO'
+#           )
+
+
+# --------------lm for negative and positive coeff
+
+# p_meth_adj_neg <- lm_plot(df = adj_sc_df_neg$`Without NonCpG Probes`, x = 'risk_score',
+#                           y = 'mean_meth',
+#                           xlab = "Risk score",
+#                           ylab  = "Mean methylation",
+#                           model = 'seperate',
+#                           group = "CurrentPTSD",
+#                           fig_legend = FALSE,
+#                           legend = '',
+#                           title = "Test set adjusted and scaled: \n Without NonCpG Probes")
+# 
+# 
+# p_meth_adj_neg1 <- lm_plot(df = adj_sc_df_neg$`Without NonCpGXY Probes`, x = 'risk_score',
+#                           y = 'mean_meth',
+#                           xlab  = "Risk score",
+#                           ylab = "",
+#                           model = 'seperate',
+#                           group = "CurrentPTSD",
+#                           fig_legend = TRUE,
+#                           legend = 'Current PTSD',
+#                           title = "Test set adjusted and scaled: \n Without NonCpGXY Probes")
+# 
+# plot_grid(p_meth_adj_neg, p_meth_adj_neg1,
+#            labels = 'AUTO'
+#           )
+```
+
+### Plot for SOBP poster
+
+```{r}
+# p_meth_adj_sep <- lm_plot(df = adj_sc_df, x = 'risk_score',
+#                           y = 'mean_meth',
+#                           xlab = "Risk score",
+#                           ylab = "Mean methylation",
+#                           model = 'seperate',
+#                           group = "CurrentPTSD",
+#                           legend = 'Current PTSD',
+#                           title = "")
+
+# p_meth_adj_sep
+```
+
+### Density plot function
+
+```{r}
+make_densityplot <- function(df, x, y, xlab, ylab, fig_legend = TRUE,
+                             title = '', legend = '', facet = FALSE){
+  if(is.numeric(df[[x]])){
+    b <- floor(seq(min(df[, x], na.rm = T), max(df[, x], na.rm = T), 1))
+    
+    p <- ggplot(data=df, aes_string(x=x, group=y, fill=y)) +
+    geom_density(adjust=1.5, alpha=.8) + scale_x_continuous(breaks = b)
+  }else{
+    p <- ggplot(data=df, aes_string(x=x, group=y, fill=y)) +
+    geom_density(adjust=1.5, alpha=.8)
+    
+  }
+  
+    #theme_classic()
+  
+  if(facet != FALSE){
+    print('Adding facet')
+    p <- p + facet_wrap(as.formula(paste("~", facet)))+
+      theme(strip.text.x = element_text(size = 16))
+  }
+    
+  
+  if(fig_legend){
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF"))
+  }else{
+    p <- p + scale_fill_manual(legend,
+                      values  = c("#0072B5FF", "#BC3C29FF")) +
+      theme(legend.position = 'none')
+  }
+
+  p <- p + ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)+ th
+}
+```
+
+```{r, fig.width=13, fig.height=5}
+
+# for risk scores
+p1_sc_d <- make_densityplot(df = adj_sc_df$`Without NonCpG Probes`, 
+                            x = 'risk_score',
+                            y = 'CurrentPTSD',
+                            xlab = 'Risk score',
+                             ylab = "Density",
+                             fig_legend = FALSE,
+                             # legend = "Current PTSD",
+                             title = "Test set covariate adjusted and scaled :\nWithout NonCpG Probes")
+# p1_sc_d
+
+p1_sc_d1 <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                             x = 'risk_score',
+                             y = 'CurrentPTSD',
+                             xlab = 'Risk score',
+                             ylab = "",
+                             legend = "Current PTSD",
+                             title = "Test set covariate adjusted and scaled :\nWithout NonCpGXY Probes")
+
+
+p1_army_sc_d <- make_densityplot(df = army_sc_df$`Without NonCpG Probes`, 
+                                 x = 'risk_score',
+                                 y = 'CurrentPTSD',
+                                 xlab = 'Risk score',
+                                 ylab = "Density",
+                                 fig_legend = FALSE,
+                                 # legend = "Current PTSD",
+                                 title = "Covariate adjusted and scaled: \n Without NonCpG Probes \n (3 Army cohorts) ")
+
+p1_army_sc_d1 <- make_densityplot(df = army_sc_df$`Without NonCpGXY Probes`,
+                                  x = 'risk_score',
+                                  y = 'CurrentPTSD',
+                                  xlab = 'Risk score',
+                                  ylab = "",
+                                  legend = "Current PTSD",
+                                  title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes \n (3 Army cohorts) ")
+
+
+cowplot::plot_grid(p1_sc_d, p1_sc_d1, rel_widths = c(1.3, 2),
+                   labels = 'AUTO')
+
+cowplot::plot_grid(p1_army_sc_d, p1_army_sc_d1, rel_widths = c(1.5, 2),
+                   labels = 'AUTO')
+
+
+```
+
+### Density plots for Individual Cohorts
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+
+# for risk scores
+
+risk_vars <- c("risk_score", "meth_only_risk_score")
+
+independent_plots <- function(vars, indp_dfs, wo_exp=FALSE){
+  plots <- lapply(seq_along(vars), function(j){
+  # print("Risk scores variables :", x)
+  
+  ind_den_plots <- lapply(seq_along(indp_dfs), function(i){
+  if(i == 5){
+    fig_legend = TRUE # change this to true for legend later
+    legend = "Current PTSD"
+  }else{
+    fig_legend = FALSE
+    legend = "test"
+  }
+    if(wo_exp | j > 1){
+      xlab = 'Methylation risk score'
+    }else if (j == 1){
+      xlab = 'Risk score'
+    }
+  
+    make_densityplot(df = indp_dfs[[i]], 
+                     x = vars[j],
+                     y = 'CurrentPTSD',
+                     xlab = xlab,
+                     ylab = "Density",
+                     fig_legend = fig_legend,
+                     legend = legend,
+                     title = names(indp_dfs)[i])
+})
+})
+  
+}
+
+
+
+# ind_den_plots
+ind_den_plots <- independent_plots(vars = risk_vars, indp_dfs = ind_sc_df_wd_score)
+
+p1 <- plot_grid(plotlist = ind_den_plots[[1]][1:3], nrow = 1)
+p2 <- plot_grid(plotlist = ind_den_plots[[1]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+p1_p2_ind <- plot_grid(p1,p2, nrow = 2)
+indp_cohorts.grob <- textGrob("Individual cohorts", 
+                   gp=gpar(fontsize=20))
+
+grid.arrange(arrangeGrob(p1_p2_ind, top = indp_cohorts.grob))
+
+# plot_grid(plot_grid(plotlist = ind_den_plots[1:4], cols = 3),
+#          plot_grid(ind_den_plots[5],    rel_widths = 1))
+
+p1_m <- plot_grid(plotlist = ind_den_plots[[2]][1:3], nrow = 1)
+p2_m <- plot_grid(plotlist = ind_den_plots[[2]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+p1_p2_ind_m <- plot_grid(p1_m,p2_m, nrow = 2)
+
+indp_cohorts_wo_exp.grob <- textGrob("Individual cohorts without exposure variables", 
+                   gp=gpar(fontsize=20))
+
+grid.arrange(arrangeGrob(p1_p2_ind_m, top = indp_cohorts_wo_exp.grob))
+```
+
+### Weights from Without exposure variables model
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+
+# ind_den_plots
+ind_den_plots_wo_exp_in_model <- independent_plots(vars = risk_vars[2], 
+                                                   indp_dfs = ind_sc_df_wo_exp_in_model,
+                                                   wo_exp = TRUE)
+
+
+p1_m_wo_exp_in_model <- plot_grid(plotlist = ind_den_plots_wo_exp_in_model[[1]][1:3], nrow = 1)
+p2_m_wo_exp_in_model <- plot_grid(plotlist = ind_den_plots_wo_exp_in_model[[1]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+p1_p2_ind_wo_exp_in_model <- plot_grid(p1_m_wo_exp_in_model, p2_m_wo_exp_in_model, nrow = 2)
+
+indp_cohorts_wo_exp_in_model.grob <- textGrob("Individual cohorts without exposure variables in the model", 
+                   gp=gpar(fontsize=20))
+
+grid.arrange(arrangeGrob(p1_p2_ind_wo_exp_in_model, top = indp_cohorts_wo_exp_in_model.grob))
+
+```
+
+### independent cohorts test set
+
+```{r}
+#| fig-width: 12
+#| fig-height: 8
+ind_test_den_plots <- independent_plots(vars = risk_vars, indp_dfs = ind_sc_df_test_wd_score)
+
+p1 <- plot_grid(plotlist = ind_test_den_plots[[1]][1:3], nrow = 1)
+p2 <- plot_grid(plotlist = ind_test_den_plots[[1]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+
+indp_cohorts_test.grob <- textGrob("Individual cohorts testset", 
+                   gp=gpar(fontsize=20))
+
+p1_p2 <- plot_grid(p1,p2, nrow = 2)
+grid.arrange(arrangeGrob(p1_p2, top = indp_cohorts_test.grob))
+
+# plot_grid(plot_grid(plotlist = ind_den_plots[1:4], cols = 3),
+#          plot_grid(ind_den_plots[5],    rel_widths = 1))
+
+p1_m <- plot_grid(plotlist = ind_test_den_plots[[2]][1:3], nrow = 1)
+p2_m <- plot_grid(plotlist = ind_test_den_plots[[2]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+p1_p2_m <- plot_grid(p1_m,p2_m, nrow = 2)
+
+
+indp_cohorts_test_wo_exp.grob <- textGrob("Individual cohorts testset without exposure variables", 
+                   gp=gpar(fontsize=20))
+
+grid.arrange(arrangeGrob(p1_p2_m, top = indp_cohorts_test_wo_exp.grob))
+
+```
+
+### independent test wo exposure variables in model
+
+```{r}
+
+#| fig-width: 12
+#| fig-height: 8
+
+# ind_den_plots
+ind_test_den_plots_wo_exp_in_model <- independent_plots(vars = risk_vars[2], 
+                                          indp_dfs = ind_sc_df_test_wo_exp_in_model,
+                                          wo_exp = TRUE)
+
+indp_cohorts_test_wo_exp_in_model.grob <- textGrob("Individual cohorts testset without exposure variables in model", 
+                   gp=gpar(fontsize=20))
+
+p1_test_wo_exp_in_model <- plot_grid(plotlist = ind_test_den_plots_wo_exp_in_model[[1]][1:3], nrow = 1)
+p2_test_wo_exp_in_model <- plot_grid(plotlist = ind_test_den_plots_wo_exp_in_model[[1]][4:5],
+                rel_widths = c(0.5, 0.75), nrow = 1)
+
+p1_p2_test_wo_exp_in_model <- plot_grid(p1_test_wo_exp_in_model, p2_test_wo_exp_in_model, nrow = 2)
+
+grid.arrange(arrangeGrob(p1_p2_test_wo_exp_in_model, top = indp_cohorts_test_wo_exp_in_model.grob))
+```
+
+### Case, controls and males, females in train test
+
+```{r}
+table(adj_sc_df$`Without NonCpGXY Probes`$CurrentPTSD)
+table(adj_sc_df$`Without NonCpGXY Probes`$CurrentPTSD)/nrow(adj_sc_df$`Without NonCpGXY Probes`)*100
+
+table(adj_sc_df$`Without NonCpGXY Probes`$Gender)
+```
+
+### To confirm if females have high scores compared to males (as in VA samples)
+
+```{r, fig.width=14, fig.height=5}
+
+# we'll get the sex info from the earlier dataset 
+# when we had gender as significant feature
+# It 
+
+# sex_info <- read.csv("G:/PGC ML/Combined Data/2021-11-27_19-16-35/risk scores ptsdpm test data.csv")
+# 
+# dim(adj_sc_df$`Without NonCpG Probes`)
+# 
+# # all should be True
+# table(adj_sc_df$`Without NonCpG Probes`$CurrentPTSD == sex_info$ptsdpm)
+# table(as.integer(adj_sc_df$`Without NonCpG Probes`$TraumaNumber) == as.integer(sex_info$Traumanum))
+# 
+
+# adj_sc_df$`Without NonCpG Probes`$Gender <- as.factor(sex_info$Gender)
+# adj_sc_df$`Without NonCpGXY Probes`$Gender <- as.factor(sex_info$Gender)
+
+
+adj_sc_df$`Without NonCpG Probes`$Gender <- as.factor(adj_sc_df$`Without NonCpG Probes`$Gender)
+adj_sc_df$`Without NonCpGXY Probes`$Gender <- as.factor(adj_sc_df$`Without NonCpG Probes`$Gender)
+
+mf_rsk_p <- make_densityplot(df = adj_sc_df$`Without NonCpG Probes`,
+                             x = 'risk_score',
+                             y = 'Gender',
+                             xlab = 'Risk score',
+                             ylab = "Density",
+                             fig_legend = FALSE,
+                             legend = "",
+                             facet = "CurrentPTSD",
+                             title = "Test set, controls and cases separately \n(Without NonCpG Probes)")
+
+mf_rsk_p1 <- make_densityplot(df = adj_sc_df$`Without NonCpG Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "",
+                         fig_legend = TRUE,
+                         legend = "Gender",
+                         title = "Test set, controls and cases together \n(Without NonCpG Probes)")
+cowplot::plot_grid(mf_rsk_p, mf_rsk_p1, rel_widths = c(2, 1.3))
+
+
+
+mf_rsk_p2 <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         legend = "",
+                         facet = "CurrentPTSD",
+                         title = "Test set, controls and cases separately \n(Without NonCpGXY Probes)")
+
+mf_rsk_p3 <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "",
+                         fig_legend = TRUE,
+                         legend = "Gender",
+                         title = "Controls and cases together \n(Without NonCpGXY Probes)")
+cowplot::plot_grid(mf_rsk_p2, mf_rsk_p3, rel_widths = c(2, 1.3))
+
+
+# ---------------- check if females have higher symptom severity
+
+# Non CPG probes separate and together
+mf_rsk_ptss <- make_densityplot(df = adj_sc_df$`Without NonCpG Probes`, x = 'Pts_Severity',
+                         y = 'Gender',
+                         xlab = 'PTSS',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         legend = "",
+                         facet = "CurrentPTSD",
+                         title = "Test set, controls and cases separately \n(Without NonCpG Probes)")
+
+mf_rsk_ptss1 <- make_densityplot(df = adj_sc_df$`Without NonCpG Probes`, x = 'Pts_Severity',
+                         y = 'Gender',
+                         xlab = 'PTSS',
+                         ylab = "",
+                         fig_legend = TRUE,
+                         legend = "Gender",
+                         title = "Test set, controls and cases together \n(Without NonCpG Probes)")
+cowplot::plot_grid(mf_rsk_ptss, mf_rsk_ptss1, rel_widths = c(2, 1.3))
+
+
+# Non CPG and XY probes separate and together
+mf_rsk_ptss2 <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, x = 'Pts_Severity',
+                         y = 'Gender',
+                         xlab = 'PTSS',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         legend = "",
+                         facet = "CurrentPTSD",
+                         title = "Test set, controls and cases separately \n(Without NonCpGXY Probes)")
+
+mf_rsk_ptss3 <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, x = 'Pts_Severity',
+                         y = 'Gender',
+                         xlab = 'PTSS',
+                         ylab = "",
+                         fig_legend = TRUE,
+                         legend = "Gender",
+                         title = "Test set, controls and cases together \n(Without NonCpGXY Probes)")
+cowplot::plot_grid(mf_rsk_ptss2, mf_rsk_ptss3, rel_widths = c(2, 1.3))
+
+
+```
+
+### Check risk scores for males and females in train and test (current ptsd)
+
+```{r, fig.width=14, fig.height=5}
+test_df <- current_all_sc$`Without NonCpG Probes`
+table(cur_sc_df$`Without NonCpG Probes`$CurrentPTSD == train_test$current_ptsd)
+
+table(test_df$TraumaNumber == train_test$Traumanum)
+
+table(as.integer(test_df$ChildhoodMaltreatment) == as.integer(train_test$Childhood_Mt))
+
+cur_sc_df$`Without NonCpG Probes`$Gender <- as.factor(train_test$Gender)
+cur_sc_df$`Without NonCpGXY Probes`$Gender <- as.factor(train_test$Gender)
+
+
+mf_rsk_all_p <- make_densityplot(df = cur_sc_df$`Without NonCpG Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         legend = "",
+                         facet = "CurrentPTSD",
+                         title = "Controls and cases separately \n ( in train and test Without NonCpG Probes)")
+
+mf_rsk_all_p1 <- make_densityplot(df = cur_sc_df$`Without NonCpG Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "",
+                         fig_legend = TRUE,
+                         legend = "Gender",
+                         title = "Controls and cases together \n(in train and test Without NonCpG Probes)")
+cowplot::plot_grid(mf_rsk_all_p, mf_rsk_all_p1, rel_widths = c(2, 1.3))
+
+
+mf_rsk_all_p2 <- make_densityplot(df = cur_sc_df$`Without NonCpGXY Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         legend = "",
+                         facet = "CurrentPTSD",
+                         title = "Controls and cases separately \n ( in train and test - Without NonCpGXY Probes)")
+
+mf_rsk_all_p3 <- make_densityplot(df = cur_sc_df$`Without NonCpGXY Probes`, x = 'risk_score',
+                         y = 'Gender',
+                         xlab = 'Risk score',
+                         ylab = "",
+                         legend = "Gender",
+                         title = "Controls and cases together \n(in train and test - Without NonCpGXY Probes)")
+
+cowplot::plot_grid(mf_rsk_all_p2, mf_rsk_all_p3, rel_widths = c(2, 1.3))
+```
+
+#### Distribution of mean methylation of positive and negative coefficient features for cases and controls
+
+```{r, fig.width=14, fig.height=5}
+
+# # Positive coefficient features
+# p1_pos_meth <- make_densityplot(df = adj_sc_df_pos$`Without NonCpG Probes`,
+#                                 x = 'mean_meth',
+#                                 y = 'CurrentPTSD',
+#                                 xlab = 'Mean methylation',
+#                                 ylab = "Density",
+#                                 fig_legend = FALSE,
+#                                 # legend = "Current PTSD",
+#                                 title = "Covariate adjusted and scaled: \n Without NonCpG Probes \n (positive coefficient) ")
+# 
+# p2_pos_meth <- make_densityplot(df = adj_sc_df_pos$`Without NonCpGXY Probes`, x = 'mean_meth',
+#                          y = 'CurrentPTSD',
+#                          xlab = 'Mean methylation',
+#                          ylab = "",
+#                          legend = "Current PTSD",
+#                          title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes \n (positive coefficient) ")
+# 
+# cowplot::plot_grid(p1_pos_meth, p2_pos_meth, rel_widths = c(2, 1.3))
+# 
+# 
+# # ---------------------------------------------------
+# # Negative coefficient features
+# p1_neg_meth <- make_densityplot(df = adj_sc_df_neg$`Without NonCpG Probes`, x = 'mean_meth',
+#                          y = 'CurrentPTSD',
+#                          xlab = 'Mean methylation',
+#                          ylab = "Density",
+#                          fig_legend = FALSE,
+#                          # legend = "Current PTSD",
+#                          title = "Covariate adjusted and scaled: \n Without NonCpG Probes \n (negative coefficient) ")
+# 
+# p2_neg_meth <- make_densityplot(df = adj_sc_df_neg$`Without NonCpGXY Probes`, x = 'mean_meth',
+#                          y = 'CurrentPTSD',
+#                          xlab = 'Mean methylation',
+#                          ylab = "",
+#                          legend = "Current PTSD",
+#                          title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes \n (negative coefficient) ")
+# 
+# cowplot::plot_grid(p1_neg_meth, p2_neg_meth, rel_widths = c(2, 1.3))
+# 
+# 
+# 
+# # --------------------------------------------------------
+# # positive coefficient features for males and females separately
+# adj_sc_df_pos$`Without NonCpG Probes`$Gender <- as.factor(adj_sc_df_pos$`Without NonCpG Probes`$Gender)
+# adj_sc_df_pos$`Without NonCpGXY Probes`$Gender <- as.factor(adj_sc_df_pos$`Without NonCpGXY Probes`$Gender)
+# 
+# p1_pos_meth_sep <- make_densityplot(df = adj_sc_df_pos$`Without NonCpG Probes`, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "Density",
+#                          fig_legend = FALSE,
+#                          legend = "",
+#                          facet = "CurrentPTSD",
+#                          title = "Controls and cases separately \n ( positive coef - Without NonCpG Probes)")
+# 
+# p1_pos_meth_sep1 <- make_densityplot(df = adj_sc_df_pos$`Without NonCpGXY Probes`, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "Density",
+#                          fig_legend = TRUE,
+#                          legend = "Gender",
+#                          facet = "CurrentPTSD",
+#                          title = "Controls and cases separately \n ( positive coef - Without NonCpGXY Probes)")
+# 
+# cowplot::plot_grid(p1_pos_meth_sep, p1_pos_meth_sep1, rel_widths = c(1.5, 2))
+# 
+# 
+# # -----------------------------------------
+# # Negative coefficient features for males and females separately 
+# adj_sc_df_neg$`Without NonCpG Probes`$Gender <- as.factor(adj_sc_df_neg$`Without NonCpG Probes`$Gender)
+# adj_sc_df_neg$`Without NonCpGXY Probes`$Gender <- as.factor(adj_sc_df_neg$`Without NonCpGXY Probes`$Gender)
+# 
+# p1_neg_meth_sep <- make_densityplot(df = adj_sc_df_neg$`Without NonCpG Probes`, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "Density",
+#                          fig_legend = FALSE,
+#                          legend = "",
+#                          facet = "CurrentPTSD",
+#                          title = "Controls and cases separately \n ( negative coef - Without NonCpG Probes)")
+# 
+# p1_neg_meth_sep1 <- make_densityplot(df = adj_sc_df_neg$`Without NonCpGXY Probes`, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "Density",
+#                          fig_legend = TRUE,
+#                          legend = "Gender",
+#                          facet = "CurrentPTSD",
+#                          title = "Controls and cases separately \n ( negative coef - Without NonCpGXY Probes)")
+# 
+# cowplot::plot_grid(p1_neg_meth_sep, p1_neg_meth_sep1, rel_widths = c(1.5, 2))
+
+```
+
+### Without using gender in estimating risk scores, check risk scores for males and females in train and test (current ptsd)
+
+```{r, fig.width=14, fig.height=5}
+# cur_sc_df_gen$Gender <- as.factor(cur_sc_df_gen$Gender)
+# mf_rsk_all_gen_p <- make_densityplot(df = cur_sc_df_gen, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "Density",
+#                          fig_legend = FALSE,
+#                          legend = "",
+#                          facet = "CurrentPTSD",
+#                          title = "Controls and cases seprately \n ( in train and test)")
+# 
+# mf_rsk_all_gen_p1 <- make_densityplot(df = cur_sc_df_gen, x = 'risk_score',
+#                          y = 'Gender',
+#                          xlab = 'Risk score',
+#                          ylab = "",
+#                          fig_legend = TRUE,
+#                          legend = "Gender",
+#                          title = "Controls and cases together \n(in train and test)")
+# cowplot::plot_grid(mf_rsk_all_gen_p, mf_rsk_all_gen_p1, rel_widths = c(2, 1.3))
+```
+
+## Box plot function
+
+```{r}
+make_boxplot <- function(df, x, y, xlab, ylab,
+                         test_pval, y_pos, title = ""){
+  p <- df %>%
+    ggplot(aes_string(x = x, y = y, fill = x)) +
+    geom_boxplot(lwd = 1) +
+    scale_fill_manual(values = c("#0072B5FF", "#BC3C29FF")) +
+    geom_jitter(size=1.7, alpha=0.9) +
+    theme_classic()+
+    theme(legend.position="none") + th +
+
+    ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)
+
+  # add significance
+  p + geom_signif(
+    annotation = formatC(test_pval, digits = 2),
+    y_position = y_pos , xmin = 1, xmax = 2, size = 1,
+    textsize = 5, tip_length = c(0.15, 0.02))
+}
+
+```
+
+# ---------------------------------------------
+
+```{r, fig.width=10, fig.height=5}
+
+wcox_test_sc <- wilcox.test(risk_score ~ CurrentPTSD, 
+                            data = adj_sc_df$`Without NonCpG Probes`)
+wcox_test_sc
+wcox_test_sc$p.value
+
+
+p1_box_sc <- make_boxplot(df = adj_sc_df$`Without NonCpG Probes`, 
+                          x = 'CurrentPTSD',
+                          y = 'risk_score',
+                          xlab = 'Current PTSD',
+                          ylab = 'Risk score',
+                          test_pval = wcox_test_sc$p.value,
+                          y_pos = 4.8,
+                          title = "Covariate adjusted and scaled: \n Without NonCpG Probes"
+                          )
+# p1_box_sc
+
+
+wcox_test_sc1 <- wilcox.test(risk_score ~ CurrentPTSD, 
+                             data = adj_sc_df$`Without NonCpGXY Probes`)
+wcox_test_sc1
+wcox_test_sc1$p.value
+
+p1_box_sc1 <- make_boxplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                           x = 'CurrentPTSD',
+                           y = 'risk_score',
+                           xlab = 'Current PTSD',
+                           ylab = 'Risk score',
+                           test_pval = wcox_test_sc1$p.value,
+                           y_pos = 4.7,
+                           title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes"
+                           )
+# p1_box_sc1
+
+plot_grid(p1_box_sc, p1_box_sc1, nrow = 1)
+
+# life
+# wcox_test_life_sc <- wilcox.test(risk_score ~ LifetimePTSD, 
+#                                 data =adj_life_sc_df$`Without NonCpG Probes`)
+
+# wcox_test_life_sc
+# wcox_test_life_sc$p.value
+# 
+# p1_box_life_sc <- make_boxplot(df = adj_life_sc_df, x = 'LifetimePTSD',
+#                        y = 'risk_score',
+#                        xlab = 'Lifetime PTSD',
+#                        ylab = '',
+#                        test_pval = wcox_test_life_sc$p.value,
+#                        y_pos = .54,
+#                        title = "" # Covariate adjusted \nand scaled
+#                        )
+# p1_box_life_sc
+# 
+# 
+# 
+# # --------------------------
+
+```
+
+### Density plot for ISTSS
+
+```{r, fig.width=8, fig.height=4}
+istss_den <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                              x = 'risk_score',
+                              y = 'CurrentPTSD',
+                              xlab = 'Risk score',
+                              ylab = "Density",
+                              fig_legend = FALSE,
+                              legend = "",
+                              title = ""
+                              )
+
+istss_den_meth <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                                   x = 'meth_only_risk_score',
+                                   y = 'CurrentPTSD',
+                                   xlab = 'Risk score (methylation)',
+                                   ylab = "",
+                                   legend = "Current\n PTSD",
+                                   title = ""
+                                   )
+
+
+
+# istss_den
+# 
+# istss_den_meth
+
+cowplot::plot_grid(istss_den, istss_den_meth,
+                   rel_widths = c(1.5, 2))
+
+
+```
+
+### Box plots for Individual Cohorts
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+indp_wcox <- lapply(ind_sc_df_wd_score, function(x){ 
+  wilcox.test(risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+indp_wcox_pvals <- lapply(indp_wcox, function(x){
+  x$p.value
+})
+indp_wcox_pvals
+
+
+indp_box_plots <- lapply(seq_along(ind_sc_df_wd_score), function(i){
+   if(i %in% c(4,5)){
+    y_pos = 3.5
+  }else{y_pos = 4}
+  
+   if(i %in% c(2,3,5)){
+    ylab = ""
+   }else{ylab = 'Risk score'}
+   make_boxplot(df = ind_sc_df_wd_score[[i]], 
+                x = 'CurrentPTSD',
+                y = 'risk_score',
+                xlab = 'Current PTSD',
+                ylab = ylab,
+                test_pval = indp_wcox[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_wd_score)[i]
+                )
+})
+ 
+# indp_box_plots
+
+indp_box_p <- plot_grid(plotlist = indp_box_plots)
+grid.arrange(arrangeGrob(indp_box_p, top= indp_cohorts.grob))
+
+
+
+indp_wcox_meth <- lapply(ind_sc_df_wd_score, function(x){
+  wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+lapply(indp_wcox_meth, function(x){
+  x$p.value
+})
+
+
+indp_box_plots_meth <- lapply(seq_along(ind_sc_df_wd_score), function(i){
+  if(i ==3){
+    y_pos = 4
+  }else if(i == 5){
+    y_pos = 2
+  }
+  else{y_pos = 2.5}
+  
+  if(i %in% c(2,3,5)){
+    ylab = ""
+  }else{ylab = 'Methylation risk score'}
+  
+   make_boxplot(df = ind_sc_df_wd_score[[i]], 
+                x = 'CurrentPTSD',
+                y = 'meth_only_risk_score',
+                xlab = 'Current PTSD',
+                ylab = ylab,
+                test_pval = indp_wcox_meth[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_wd_score)[i]
+                )
+})
+ 
+# indp_box_plots
+
+
+indp_box_p_meth <- plot_grid(plotlist = indp_box_plots_meth)
+grid.arrange(arrangeGrob(indp_box_p_meth, top= indp_cohorts_wo_exp.grob))
+
+
+indp_wcox_wo_exp_in_model <- lapply(ind_sc_df_wo_exp_in_model, function(x){ 
+  
+  wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+indp_box_plots_wo_exp_in_model <- lapply(seq_along(ind_sc_df_wo_exp_in_model), function(i){
+  if(i %in% c(2,3)){
+    y_pos = 4
+  }else if(i == 5){
+    y_pos = 2.5
+  }
+  else{y_pos = 3}
+  
+  if(i %in% c(2,3,5)){
+    ylab = ""
+  }else{ylab = 'Methylation risk score'}
+  
+   make_boxplot(df = ind_sc_df_wo_exp_in_model[[i]], 
+                x = 'CurrentPTSD',
+                y = 'meth_only_risk_score',
+                xlab = 'Current PTSD',
+                ylab = ylab,
+                test_pval = indp_wcox_wo_exp_in_model[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_wo_exp_in_model)[i]
+                )
+})
+ 
+# indp_box_plots
+
+indp_box_p_wo_exp <- plot_grid(plotlist = indp_box_plots_wo_exp_in_model)
+grid.arrange(arrangeGrob(indp_box_p_wo_exp, top= indp_cohorts_wo_exp_in_model.grob))
+```
+
+### Box plots for Individual Cohorts TEST SET
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+indp_wcox_test <- lapply(ind_sc_df_test_wd_score, function(x){ 
+  wilcox.test(risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+indp_wcox_pvals_test <- lapply(indp_wcox_test, function(x){
+  x$p.value
+})
+indp_wcox_pvals_test
+
+
+indp_box_plots_test <- lapply(seq_along(ind_sc_df_test_wd_score), function(i){
+  
+  if(i %in% c(1,4,5)){
+    y_pos = 3
+  }else{y_pos = 4}
+  
+   make_boxplot(df = ind_sc_df_test_wd_score[[i]], 
+                x = 'CurrentPTSD',
+                y = 'risk_score',
+                xlab = 'Current PTSD',
+                ylab = 'Risk score',
+                test_pval = indp_wcox_test[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_test_wd_score)[i]
+                )
+})
+ 
+# indp_box_plots
+
+indp_box_p_test <- plot_grid(plotlist = indp_box_plots_test)
+
+grid.arrange(arrangeGrob(indp_box_p_test, top = indp_cohorts_test.grob))
+
+
+
+indp_wcox_meth_test <- lapply(ind_sc_df_test_wd_score, function(x){
+  wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+lapply(indp_wcox_meth_test, function(x){
+  x$p.value
+})
+
+
+indp_box_plots_meth_test <- lapply(seq_along(ind_sc_df_test_wd_score), function(i){
+  if(i %in% c(1, 4)){
+    y_pos = 1.3
+  }else if(i %in% c(5)){
+    y_pos = .1
+  }else if(i%in% c(2)){
+    y_pos=2.2
+  }else{y_pos = 3}
+  
+  if(i %in% c(2,3,5)){
+    ylab = ""
+  }else{ylab = 'Methylation risk score'}
+  
+   make_boxplot(df = ind_sc_df_test_wd_score[[i]], 
+                x = 'CurrentPTSD',
+                y = 'meth_only_risk_score',
+                xlab = 'Current PTSD',
+                ylab = ylab,
+                test_pval = indp_wcox_meth_test[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_test_wd_score)[i]
+                )
+})
+ 
+# indp_box_plots
+
+indp_box_p_meth_test <- plot_grid(plotlist = indp_box_plots_meth_test)
+grid.arrange(arrangeGrob(indp_box_p_meth_test, top = indp_cohorts_test_wo_exp.grob))
+
+
+indp_wcox_wo_exp_test <- lapply(ind_sc_df_test_wo_exp_in_model, function(x){ 
+  
+  wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                            data = x)
+})
+
+indp_box_plots_wo_exp_test <- lapply(seq_along(ind_sc_df_test_wo_exp_in_model), function(i){
+ if(i %in% c(1, 4)){
+    y_pos = 2
+  }else if(i %in% c(5)){
+    y_pos = .8
+  }else if(i%in% c(2)){
+    y_pos=3
+  }else{y_pos = 3.5}
+  
+  if(i %in% c(2,3,5)){
+    ylab = ""
+  }else{ylab = 'Methylation risk score'}
+  
+   make_boxplot(df = ind_sc_df_test_wo_exp_in_model[[i]], 
+                x = 'CurrentPTSD',
+                y = 'meth_only_risk_score',
+                xlab = 'Current PTSD',
+                ylab = ylab,
+                test_pval = indp_wcox_wo_exp_test[[i]]$p.value,
+                y_pos = y_pos,
+                title = names(ind_sc_df_test_wo_exp_in_model)[i]
+                )
+})
+ 
+# indp_box_plots
+
+indp_box_p_wo_exp_test <- plot_grid(plotlist = indp_box_plots_wo_exp_test)
+grid.arrange(arrangeGrob(indp_box_p_wo_exp_test, top = indp_cohorts_test_wo_exp_in_model.grob))
+
+```
+
+### Box plot for ISTSS
+
+```{r fig.height=7, fig.width=7}
+
+
+p1_box_istss <- make_boxplot(df = adj_sc_df$`Without NonCpGXY Probes`,
+                             x = 'CurrentPTSD',
+                             y = 'risk_score',
+                             xlab = '',
+                             ylab = 'Risk score',
+                             test_pval = wcox_test_sc1$p.value,
+                             y_pos = 4.7,
+                             title = ""
+                             )
+
+
+wcox_test_meth <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                             data = adj_sc_df$`Without NonCpGXY Probes`)
+wcox_test_meth
+wcox_test_meth$p.value
+
+p1_box_istss_meth <- make_boxplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                                  x = 'CurrentPTSD',
+                                  y = 'meth_only_risk_score',
+                                  xlab = '',
+                                  ylab = 'Risk score (methylation)',
+                                  test_pval = wcox_test_meth$p.value,
+                                  y_pos = 3.2,
+                                  title = ""
+                                  )
+
+# arrange den plots
+p1 <- cowplot::plot_grid(istss_den, istss_den_meth, 
+                         labels = c("A","B"),
+                         label_x = .15 , vjust = 2,
+                         rel_widths = c(1.5, 2))
+
+# add title to den plots
+title_den.grob <- textGrob("Distribution of risk scores",
+                   gp=gpar(fontsize=20), vjust = 2)
+
+p1 <- grid.arrange(arrangeGrob(p1, top = title_den.grob))
+
+# arrange box plots
+p2 <- cowplot::plot_grid(p1_box_istss, 
+                         p1_box_istss_meth,
+                         labels = c("C","D"),
+                         label_x = .15 , vjust = 2)
+
+# add title to box plots
+title.grob <- textGrob("Difference in risk scores",
+                   gp=gpar(fontsize=20), vjust = 2)
+p2 <- grid.arrange(arrangeGrob(p2, top = title.grob))
+
+# add x label to box plots
+x.grob <- textGrob("Current PTSD",
+                   gp=gpar(fontsize=18), vjust = -2)
+
+# arrange plots in grid
+p_comb <- cowplot::plot_grid(p1,p2, nrow = 2)
+
+grid.arrange(arrangeGrob(p_comb, bottom = x.grob))
+
+# p1_box_istss
+```
+
+### Box plot for without exposure variables in the model
+
+```{r, fig.height=6, fig.width=5}
+#| fig-width: 4
+#| fig-height: 6
+
+istss_den_meth_wo_exp <- make_densityplot(df = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`, 
+                                   x = 'meth_only_risk_score',
+                                   y = 'CurrentPTSD',
+                                   xlab = 'Risk score (methylation)',
+                                   ylab = "",
+                                   legend = "Current\n PTSD",
+                                   title = "Without exposure variables\nin the model"
+                                   )
+
+
+
+wcox_test_meth_wo_exp <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                             data = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`)
+wcox_test_meth_wo_exp
+wcox_test_meth_wo_exp$p.value
+p1_box_istss_meth_wo_exp <- make_boxplot(df = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`, 
+                                  x = 'CurrentPTSD',
+                                  y = 'meth_only_risk_score',
+                                  xlab = '',
+                                  ylab = 'Risk score (methylation)',
+                                  test_pval = wcox_test_meth_wo_exp$p.value,
+                                  y_pos = 3.2,
+                                  title = ""
+                                  )
+
+# arrange den plots
+p_wo_exp <- cowplot::plot_grid(istss_den_meth_wo_exp, p1_box_istss_meth_wo_exp, 
+                         nrow = 2,
+                         label_x = .15 )
+p_wo_exp
+
+# # add title to den plots
+# title_den.grob <- textGrob("Distribution of risk scores",
+#                    gp=gpar(fontsize=20), vjust = 1)
+# 
+# p1 <- grid.arrange(arrangeGrob(p1, top = title_den.grob))
+# 
+# # arrange box plots
+# p2 <- cowplot::plot_grid(p1_box_istss, 
+#                          p1_box_istss_meth,
+#                          labels = c("C","D"),
+#                          label_x = .15 , vjust = 2)
+# 
+# # add title to box plots
+# title.grob <- textGrob("Difference in risk scores",
+#                    gp=gpar(fontsize=20), vjust = 1)
+# p2 <- grid.arrange(arrangeGrob(p2, top = title.grob))
+# 
+# # add x label to box plots
+# x.grob <- textGrob("Current PTSD",
+#                    gp=gpar(fontsize=18), vjust = -2)
+# 
+# # arrange plots in grid
+# p_comb <- cowplot::plot_grid(p1,p2, nrow = 2)
+# 
+# grid.arrange(arrangeGrob(p_comb, bottom = x.grob))
+
+# p1_box_istss
+```
+
+### Box plots for models 1, 2 & 3 for manuscript. We have model 3 data saved in a file so let load that first
+
+```{r}
+model3 <- local(get(load("../../../Combined Data/2023-03-08_21-41-11/Adj_sc_df_for_pathways.RData")))
+names(model3)
+
+# model 1 & 2
+load("../../../Combined Data/2022-03-30_15-07-11/Adj_sc_df_for_pathways.RData")
+names(adj_sc_df)
+```
+
+```{r, fig.height=6, fig.width=9}
+
+#| fig-width: 9
+#| fig-height: 6
+
+m1_den <- make_densityplot(df = adj_sc_df$`Without NonCpGXY Probes`, 
+                              x = 'risk_score',
+                              y = 'CurrentPTSD',
+                              xlab = 'Risk score',
+                              ylab = "Density",
+                              fig_legend = FALSE,
+                              legend = "",
+                              title = "Model 1"
+                              )
+
+m2_den <- make_densityplot(df = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`, 
+                                   x = 'meth_only_risk_score',
+                                   y = 'CurrentPTSD',
+                                   xlab = 'Risk score (methylation)',
+                                   ylab = "",
+                                   fig_legend = FALSE,
+                                   title = "Model 2"
+                                   )
+
+m3_den <- make_densityplot(df = model3$`Without NonCpGXY Probes`, 
+                                   x = 'meth_only_risk_score',
+                                   y = 'CurrentPTSD',
+                                   xlab = 'Risk score (methylation)',
+                                   ylab = "",
+                                   legend = "Current\n PTSD",
+                                   title = "Model 3"
+                                   )
+
+wcox_m1 <- wilcox.test(risk_score ~ CurrentPTSD, 
+                             data = adj_sc_df$`Without NonCpGXY Probes`)
+m1_box <- make_boxplot(df = adj_sc_df$`Without NonCpGXY Probes`,
+                             x = 'CurrentPTSD',
+                             y = 'risk_score',
+                             xlab = '',
+                             ylab = 'Risk score',
+                             test_pval = wcox_m1$p.value,
+                             y_pos = 4.7,
+                             title = ""
+                             )
+
+
+wcox_m2 <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                             data = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`)
+wcox_m2
+wcox_m2$p.value
+
+m2_box <- make_boxplot(df = adj_sc_df$`Without NonCpGXY ProbesWoExpVar`, 
+                                  x = 'CurrentPTSD',
+                                  y = 'meth_only_risk_score',
+                                  xlab = '',
+                                  ylab = 'Risk score (methylation)',
+                                  test_pval = wcox_m2$p.value,
+                                  y_pos = 3.8,
+                                  title = ""
+                                  )
+
+
+
+wcox_m3 <- wilcox.test(meth_only_risk_score ~ CurrentPTSD, 
+                             data = model3$`Without NonCpGXY Probes`)
+wcox_m3
+wcox_m3$p.value
+
+m3_box <- make_boxplot(df = model3$`Without NonCpGXY Probes`, 
+                                  x = 'CurrentPTSD',
+                                  y = 'meth_only_risk_score',
+                                  xlab = '',
+                                  ylab = 'Risk score (methylation)',
+                                  test_pval = wcox_m3$p.value,
+                                  y_pos = 4.5,
+                                  title = ""
+                                  )
+
+# arrange den plots
+p1 <- cowplot::plot_grid(m1_den, 
+                         m2_den, 
+                         m3_den,
+                         labels = c("A"),
+                         nrow = 1,
+                         label_x = .15 , vjust = 2,
+                         rel_widths = c(1.5, 1.5, 2))
+
+# add title to den plots
+title_den.grob <- textGrob("Distribution of risk scores",
+                   gp=gpar(fontsize=18), vjust = 0.5)
+
+p1 <- grid.arrange(arrangeGrob(p1, top = title_den.grob))
+
+# arrange box plots
+p2 <- cowplot::plot_grid(m1_box, 
+                         m2_box,
+                         m3_box,
+                         nrow = 1,
+                         labels = c("B"),
+                         label_x = .15 , vjust = 2)
+
+# add title to box plots
+title.grob <- textGrob("Difference in risk scores",
+                   gp=gpar(fontsize=18), vjust = 1)
+p2 <- grid.arrange(arrangeGrob(p2, top = title.grob))
+
+# add x label to box plots
+x.grob <- textGrob("Current PTSD",
+                   gp=gpar(fontsize=15), vjust = -1.5)
+
+# arrange plots in grid
+p_comb <- cowplot::plot_grid(p1,p2, nrow = 2)
+
+grid.arrange(arrangeGrob(p_comb, bottom = x.grob))
+```
+
+### Save dfs with risk scores and weights to use in pathway analysis
+
+```{r}
+# save(adj_sc_df, file =  "../../../Combined Data/2022-03-30_15-07-11/Adj_sc_df_for_pathways.RData")
+# save(weights, file = "../../../Combined Data/2022-03-30_15-07-11/weights_for_pathways.RData")
+```
+
+### Boxplot for negative and positive coefficient features using
+
+```{r, fig.width=8.5, fig.height=6}
+# ----------------------------
+
+# wcox_test_sc_neg <- wilcox.test(risk_score ~ CurrentPTSD, 
+#                                 data = adj_sc_df_neg$`Without NonCpG Probes`)
+# wcox_test_sc_neg$p.value
+# 
+# wcox_test_sc_neg1 <- wilcox.test(risk_score ~ CurrentPTSD, 
+#                                  data = adj_sc_df_neg$`Without NonCpGXY Probes`)
+# wcox_test_sc_neg1$p.value
+# 
+# p1_box_sc_neg <- make_boxplot(df = adj_sc_df_neg$`Without NonCpG Probes`, 
+#                               x = 'CurrentPTSD',
+#                               y = 'mean_meth',
+#                               xlab = 'Current PTSD',
+#                               ylab = 'Mean methylation',
+#                               test_pval = wcox_test_sc_neg$p.value,
+#                               y_pos = .53,
+#                               title = "Covariate adjusted and scaled: \n Without NonCpG Probes \n(negative coefficients)"
+#                        )
+# # p1_box_sc
+# 
+# lapply(adj_sc_df_neg, dim)
+# 
+# lapply(adj_sc_df_pos, dim)
+# 
+# 
+# 
+# p1_box_sc_neg1 <- make_boxplot(df = adj_sc_df_neg$`Without NonCpGXY Probes`, 
+#                                x = 'CurrentPTSD',
+#                                y = 'mean_meth',
+#                                xlab = 'Current PTSD',
+#                                ylab = 'Mean methylation',
+#                                test_pval = wcox_test_sc_neg1$p.value,
+#                                y_pos = .53,
+#                                title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes \n(negative coefficients)"
+#                        )
+# 
+# plot_grid(p1_box_sc_neg, p1_box_sc_neg1, nrow = 1)
+# 
+# 
+# #------------------------------------
+# wcox_test_sc_pos <- wilcox.test(risk_score ~ CurrentPTSD, 
+#                                 data = adj_sc_df_pos$`Without NonCpG Probes`)
+# wcox_test_sc_pos$p.value
+# 
+# wcox_test_sc_pos1 <- wilcox.test(risk_score ~ CurrentPTSD, 
+#                                  data = adj_sc_df_pos$`Without NonCpGXY Probes`)
+# wcox_test_sc_pos1$p.value
+# 
+# p1_box_sc_pos <- make_boxplot(df = adj_sc_df_pos$`Without NonCpG Probes`, 
+#                               x = 'CurrentPTSD',
+#                               y = 'mean_meth',
+#                               xlab = 'Current PTSD',
+#                               ylab = 'Mean methylation',
+#                               test_pval = wcox_test_sc_pos$p.value,
+#                               y_pos = .53,
+#                               title = "Covariate adjusted and scaled: \n Without NonCpG Probes \n(positive coefficients)"
+#                        )
+# # p1_box_sc
+# 
+# 
+# p1_box_sc_pos1 <- make_boxplot(df = adj_sc_df_pos$`Without NonCpGXY Probes`, 
+#                                x = 'CurrentPTSD',
+#                                y = 'mean_meth',
+#                                xlab = 'Current PTSD',
+#                                ylab = 'Mean methylation',
+#                                test_pval = wcox_test_sc_pos1$p.value,
+#                                y_pos = .53,
+#                                title = "Covariate adjusted and scaled: \n Without NonCpGXY Probes \n(positive coefficients)"
+#                        )
+# 
+# plot_grid(p1_box_sc_pos, p1_box_sc_pos1, nrow = 1)
+```
+
+### Mean methylation
+
+```{r, fig.width=8, fig.height=4}
+
+# wcox_test_meth <- wilcox.test(mean_meth ~ CurrentPTSD, data = adj_sc_df)
+# wcox_test_meth
+# wcox_test_meth$p.value
+# # Plot risk scores for ptsd
+# 
+# 
+# p2_box <- make_boxplot(df = adj_sc_df, x = 'CurrentPTSD',
+#                        y = 'mean_meth',
+#                        xlab = 'Current PTSD',
+#                        ylab = 'Mean methylation',
+#                        test_pval = wcox_test_meth$p.value,
+#                        y_pos  = .54,
+#                        title = ""
+#                        )
+# p2_box
+# 
+# 
+# # life
+# 
+# wcox_test_meth_life <- wilcox.test(mean_meth ~ LifetimePTSD,
+#                               data = adj_life_sc_df)
+# wcox_test_meth_life
+# wcox_test_meth_life$p.value
+# # Plot risk scores for ptsd
+# 
+# 
+# p2_box_l <- make_boxplot(df = adj_life_sc_df, x = 'LifetimePTSD',
+#                        y = 'mean_meth',
+#                        xlab = 'Lifetime PTSD',
+#                        ylab = '',
+#                        test_pval = wcox_test_meth_life$p.value,
+#                        y_pos  = .54,
+#                        title = ""
+#                        )
+# p2_box_l
+# 
+# plot_grid( p2_box, p2_box_l, nrow = 1)
+
+```
+
+<!-- ### Mediation Analysis -->
+
+<!-- ```{r} -->
+
+<!-- # X → Y, X → M, and X + M → Y -->
+
+<!-- test_df = adj_sc_df$`Without NonCpG Probes` -->
+
+<!-- test_df$CurrentPTSD <- as.numeric(test_df$CurrentPTSD) -->
+
+<!-- m1 <- lm(CurrentPTSD~Gender, data = test_df) -->
+
+<!-- summary(m1) -->
+
+<!-- m12 <- lm(risk_score~Gender, data = test_df) -->
+
+<!-- summary(m12) -->
+
+<!-- m123 <- lm(CurrentPTSD~Gender+risk_score, data = test_df) -->
+
+<!-- summary(m123) -->
+
+<!-- ``` -->
+
+<!-- ### Get gene annotations -->
+
+<!-- ```{r} -->
+
+<!-- annot_file <- fread("D:/EWAS meta-analysis(Janelle)/data/infinium-methylationepic-v-1-0-b5-manifest-file.csv",  -->
+
+<!--                     data.table = F, skip = 7, fill = T) -->
+
+<!-- dim(annot_file) -->
+
+<!-- annot_file_sub <- annot_file %>% dplyr::select(IlmnID, Infinium_Design_Type, -->
+
+<!--                                         Genome_Build, CHR, MAPINFO, -->
+
+<!--                                         UCSC_RefGene_Name, UCSC_RefGene_Group,  -->
+
+<!--                                         Relation_to_UCSC_CpG_Island) -->
+
+<!-- # Importance to percent -->
+
+<!-- imp_cpgs_annot <- lapply(weights, function(x){ -->
+
+<!--   # x$Importance <- x$Importance*100 -->
+
+<!--   y <- merge(x, annot_file_sub, by = 1, all.x = T) -->
+
+<!--   y[order(y$Importance, decreasing = T), ] -->
+
+<!--   # annot_file[which(annot_file$IlmnID %in% x$Feature), ] -->
+
+<!-- }) -->
+
+<!-- lapply(imp_cpgs_annot, dim) -->
+
+<!-- lapply(imp_cpgs_annot, head) -->
+
+<!-- View(imp_cpgs_annot$`Without NonCpG Probes`) -->
+
+<!-- ``` -->
+
+<!-- ### Gene annotations -->
+
+<!-- ```{r} -->
+
+<!-- # neg_anno <- lapply(list, function) -->
+
+<!-- ``` -->
+
+<!-- ### Pathway analysis -->
+
+<!-- ```{r} -->
+
+<!-- # get cpgs -->
+
+<!-- get_pathways <- function(df, Go=TRUE, kegg= NULL, fract_counts = TRUE){ -->
+
+<!--   probes <- df %>% -->
+
+<!--     select(starts_with(c('cg','ch.'))) -->
+
+<!--   dim(probes) -->
+
+<!--   cpgs <- names(probes) -->
+
+<!--   ann <- getAnnotation(IlluminaHumanMethylationEPICanno.ilm10b2.hg19) -->
+
+<!--   # Check number of genes that significant adj_df are annotated to -->
+
+<!--   # check <- getMappedEntrezIDs(sig.cpg = cpgs) -->
+
+<!--   # length(check$sig.eg) -->
+
+<!--   if(Go & is.null(kegg) & fract_counts){ -->
+
+<!--     message("Testing GO with fraction counts") -->
+
+<!--     gst <- gometh(sig.cpg = cpgs,  -->
+
+<!--                   collection = "GO", -->
+
+<!--                   array.type = "EPIC", -->
+
+<!--                   sig.genes = TRUE, -->
+
+<!--                   anno = ann, -->
+
+<!--                   prior.prob = TRUE, -->
+
+<!--                   fract.counts = TRUE, -->
+
+<!--                   plot.bias = TRUE) -->
+
+<!--   }else if(kegg & fract_counts){ -->
+
+<!--     message("Testing KEGG with fraction counts") -->
+
+<!--     gst <- gometh(sig.cpg=cpgs, -->
+
+<!--                   collection="KEGG", -->
+
+<!--                   array.type = "EPIC", -->
+
+<!--                   sig.genes = TRUE, -->
+
+<!--                   anno = ann, -->
+
+<!--                   prior.prob = TRUE, -->
+
+<!--                   fract.counts = TRUE, -->
+
+<!--                   plot.bias=TRUE) -->
+
+<!--   } else if(Go & is.null(kegg) & !fract_counts) { -->
+
+<!--     message("Testing GO without fraction counts") -->
+
+<!--     gst <- gometh(sig.cpg = cpgs,  -->
+
+<!--                   collection = "GO", -->
+
+<!--                   array.type = "EPIC", -->
+
+<!--                   sig.genes = TRUE, -->
+
+<!--                   anno = ann, -->
+
+<!--                   plot.bias = TRUE) -->
+
+<!--   } -->
+
+<!--   # gst <- gometh(sig.cpg=cpgs, -->
+
+<!--   #               all.cpg = cpgs,  -->
+
+<!--   #               collection="GO", -->
+
+<!--   #               plot.bias=TRUE, -->
+
+<!--   #               sig.genes = TRUE, -->
+
+<!--   #               prior.prob = TRUE, -->
+
+<!--   #               equiv.cpg = TRUE, -->
+
+<!--   #               anno = ann) -->
+
+<!--   #  -->
+
+<!--    # gst_kegg <- gometh(sig.cpg=cpgs, -->
+
+<!--    #            all.cpg = cpgs, -->
+
+<!--    #            collection="KEGG", -->
+
+<!--    #            plot.bias=TRUE, -->
+
+<!--    #            sig.genes = TRUE, -->
+
+<!--    #            prior.prob = TRUE, -->
+
+<!--    #            equiv.cpg = TRUE) -->
+
+<!--   gst -->
+
+<!-- } -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- gst_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`) -->
+
+<!-- top_nonCpGXY <- gst_nonCpGXY[gst_nonCpGXY$P.DE <= 0.05, ] -->
+
+<!-- # top_nonCpGXY <- topGSA(gst_nonCpGXY) -->
+
+<!-- dim(top_nonCpGXY) -->
+
+<!-- kegg_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`, -->
+
+<!--                               kegg = TRUE) -->
+
+<!-- top_kegg_nonCpGXY <- kegg_nonCpGXY[kegg_nonCpGXY$P.DE <= 0.05, ] -->
+
+<!-- # top_nonCpGXY <- topGSA(gst_nonCpGXY) -->
+
+<!-- dim(top_kegg_nonCpGXY) -->
+
+<!-- top_ls <- list("nonCpGXY_GO" = top_nonCpGXY, -->
+
+<!--                 "nonCpGXY_KEGG" = top_kegg_nonCpGXY -->
+
+<!--                 ) -->
+
+<!-- lapply(top_ls, head) -->
+
+<!-- lapply(top_ls, dim) -->
+
+<!-- top_ls_sorted <- lapply(top_ls, function(x) x[order(x$P.DE, decreasing = F), ]) -->
+
+<!-- lapply(top_ls_sorted, dim) -->
+
+<!-- # write.xlsx(top_ls_sorted, "../data/top_GO_KEGG_NonCpGXY_EN_approach.xlsx",  -->
+
+<!-- #            rowNames = T) -->
+
+<!-- ``` -->
+
+<!-- ### This was run with the settings NOT ACCCOUNTING FOR FRACTION COUNTS, I.e is to account for CpG number and CpGs mapping with multiple genes. -->
+
+<!-- ```{r} -->
+
+<!-- # gst_nonCpG <- get_pathways(df = adj_sc_df$`Without NonCpG Probes`, -->
+
+<!-- #                              fract_counts = FALSE) -->
+
+<!-- # top_nonCpG <- gst_nonCpGXY[gst_nonCpG$P.DE <= 0.05, ] -->
+
+<!-- # # top_nonCpGXY <- topGSA(gst_nonCpGXY) -->
+
+<!-- # dim(top_nonCpG) -->
+
+<!-- #  -->
+
+<!-- # gst_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`,  -->
+
+<!-- #                             fract_counts = FALSE) -->
+
+<!-- # top_nonCpGXY <- gst_nonCpGXY[gst_nonCpGXY$P.DE <= 0.05, ] -->
+
+<!-- # # top_nonCpGXY <- topGSA(gst_nonCpGXY) -->
+
+<!-- # dim(top_nonCpGXY) -->
+
+<!-- #  -->
+
+<!-- # top_ls <- list("nonCpG" = top_nonCpG, -->
+
+<!-- #                "nonCpGXY" = top_nonCpGXY) -->
+
+<!-- # lapply(top_ls, head) -->
+
+<!-- #  -->
+
+<!-- # top_ls_sorted <- lapply(top_ls, function(x) x[order(x$P.DE, decreasing = F), ]) -->
+
+<!-- # lapply(top_ls_sorted, dim) -->
+
+<!-- # This was run without fraction counts -->
+
+<!-- # write.xlsx(top_ls_sorted, "../data/top_GO_EN_approach.xlsx", rowNames = T) -->
+
+<!-- ``` -->
+
+<!-- ### Kegg pathways -->
+
+<!-- ```{r} -->
+
+<!-- # kegg_nonCpG <- get_pathways(df = adj_sc_df$`Without NonCpG Probes`,  -->
+
+<!-- #                             kegg = TRUE) -->
+
+<!-- # top_kegg_nonCpG <- kegg_nonCpG[kegg_nonCpG$P.DE <= 0.05, ] -->
+
+<!-- # dim(top_kegg_nonCpG) -->
+
+<!-- #  -->
+
+<!-- #  -->
+
+<!-- # kegg_nonCpGXY <- get_pathways(df = adj_sc_df$`Without NonCpGXY Probes`, -->
+
+<!-- #                               kegg = TRUE) -->
+
+<!-- # top_kegg_nonCpGXY <- kegg_nonCpGXY[kegg_nonCpGXY$P.DE <= 0.05, ] -->
+
+<!-- # # top_nonCpGXY <- topGSA(gst_nonCpGXY) -->
+
+<!-- # dim(top_kegg_nonCpGXY) -->
+
+<!-- #  -->
+
+<!-- # top_ls_kegg <- list("nonCpG" = top_kegg_nonCpG, -->
+
+<!-- #                "nonCpGXY" = top_kegg_nonCpGXY) -->
+
+<!-- # lapply(top_ls_kegg, head) -->
+
+<!-- # top_ls_sorted_kegg <- lapply(top_ls_kegg, function(x) x[order(x$P.DE, decreasing = F), ]) -->
+
+<!-- # lapply(top_ls_kegg, dim) -->
+
+<!-- #  -->
+
+<!-- # write.xlsx(top_ls_sorted_kegg, "../data/top_pathways_EN_approach.xlsx", rowNames = T) -->
+
+<!-- ``` -->
+
+<!-- ### Top GO terms ISTSS -->
+
+<!-- ```{r, fig.width=9, fig.height=6.5} -->
+
+<!-- top_ls_sorted <- read_allsheets("../data/top_GO_KEGG_NonCpGXY_EN_approach.xlsx") -->
+
+<!-- colnames(top_ls_sorted$nonCpGXY_GO)[1] <- "GO" -->
+
+<!-- colnames(top_ls_sorted$nonCpGXY_KEGG)[1] <- "KEGG" -->
+
+<!-- top_25 <- top_ls_sorted$nonCpGXY_GO[1:25, ] -->
+
+<!-- top_25$ont_new <- paste0(top_25$ONTOLOGY, ":", top_25$TERM) -->
+
+<!-- plot_bar <- function(df, x, y, clr = NULL, fill = NULL,  -->
+
+<!--                      xlab, ylab, title, fac_names,  -->
+
+<!--                      fig_legend = TRUE, -->
+
+<!--                      angle = FALSE, -->
+
+<!--                      leg_pos = 'right', -->
+
+<!--                      leg_title,  -->
+
+<!--                      italic = FALSE, -->
+
+<!--                      face = NULL){ -->
+
+<!--   p <- df %>% -->
+
+<!--    ggplot( aes_string(x=x, y=y, colour = clr, fill = fill)) + -->
+
+<!--     geom_bar(stat="identity", alpha=.5, width=.3) + -->
+
+<!--     coord_flip() + -->
+
+<!--     xlab(xlab) + -->
+
+<!--     ylab(ylab) + -->
+
+<!--     ggtitle(title) -->
+
+<!--   if(!angle & !italic){ -->
+
+<!--       p = p + theme(axis.text.x = element_text(colour="black"),  -->
+
+<!--             axis.text.y =element_text(colour="black"), -->
+
+<!--             legend.position = leg_pos) + th -->
+
+<!--   } -->
+
+<!--   else if (italic){ -->
+
+<!--     p = p + theme(axis.text.x = element_text(colour="black"),  -->
+
+<!--             axis.text.y = element_text(colour="black", face = face), -->
+
+<!--             legend.position = leg_pos) + th -->
+
+<!--   }else{ -->
+
+<!--         p = p + theme(axis.text.x = element_text(colour="black",  -->
+
+<!--                                              angle = 60, vjust = 0.5),  -->
+
+<!--             axis.text.y = element_text(colour="black"), -->
+
+<!--             legend.position = leg_pos) + th -->
+
+<!--   } -->
+
+<!--  if(!fig_legend){ -->
+
+<!--     p <- p + theme(legend.position = 'none') -->
+
+<!--   } -->
+
+<!--   if(leg_pos == 'top' | leg_pos == 'bottom'){ -->
+
+<!--     print("----------------") -->
+
+<!--     p <- p + guides(fill=guide_legend(nrow=3, byrow=TRUE, -->
+
+<!--                                        title = leg_title)) -->
+
+<!--   }else{ -->
+
+<!--     p <- p + guides(fill=guide_legend(title = leg_title)) -->
+
+<!--   } -->
+
+<!--   p -->
+
+<!-- } -->
+
+<!-- top_25 <- top_25 %>% -->
+
+<!--   mutate(TERM = fct_reorder(TERM, P.DE, .desc = T)) -->
+
+<!-- plot_bar(df = top_25,  -->
+
+<!--          x = "TERM", -->
+
+<!--          y = "P.DE", -->
+
+<!--          fill = "ONTOLOGY", -->
+
+<!--          xlab = "Ontology term",  -->
+
+<!--          ylab = "P value",  -->
+
+<!--          title = "Gene Ontology: top 25", -->
+
+<!--          leg_title = "Ontology") -->
+
+<!-- ``` -->
+
+<!-- ```{r, fig.width=4, fig.height=4} -->
+
+<!-- non_cpgXY_grp <- top_ls_sorted$nonCpGXY_GO %>%  -->
+
+<!--   group_by(ONTOLOGY) %>% -->
+
+<!--   summarise(n = n()) -->
+
+<!-- non_cpgXY_grp <- non_cpgXY_grp %>%  -->
+
+<!--   mutate(Term = case_when( -->
+
+<!--     ONTOLOGY == "BP" ~ "Biological Processes (BP)", -->
+
+<!--     ONTOLOGY == "CC" ~ "Cellular Component (CC)", -->
+
+<!--     ONTOLOGY == "MF" ~ "Molecular Function (MF)")) %>% -->
+
+<!--   mutate(ONTOLOGY = fct_reorder(ONTOLOGY, n, .desc = T)) -->
+
+<!-- plot_bar(df = non_cpgXY_grp, -->
+
+<!--          x = "ONTOLOGY", -->
+
+<!--          y = "n", -->
+
+<!--          fill = "Term", -->
+
+<!--          xlab = "Ontology", -->
+
+<!--          ylab = "Number of terms",  -->
+
+<!--          title = "Ontology", -->
+
+<!--          fig_legend = TRUE, -->
+
+<!--          leg_pos = 'top', -->
+
+<!--          leg_title = '') -->
+
+<!-- ``` -->
+
+<!-- ### Pathways -->
+
+<!-- ```{r, fig.width=9, fig.height=6.5} -->
+
+<!-- top_25_path <- top_ls_sorted$nonCpGXY_KEGG[1:25, ] -->
+
+<!-- top_25_path <- top_25_path %>% -->
+
+<!--   mutate(Description = fct_reorder(Description, DE, .desc = F)) -->
+
+<!-- View(top_25_path) -->
+
+<!-- plot_bar(df = top_25_path, -->
+
+<!--          x = "Description", -->
+
+<!--          y = "DE", -->
+
+<!--          fill = "P.DE", -->
+
+<!--          xlab = "Description", -->
+
+<!--          ylab = "Number of differentialy expressed genes",  -->
+
+<!--          title = "Top 25 pathways", -->
+
+<!--          fig_legend = TRUE, -->
+
+<!--          leg_title = 'pvalue') -->
+
+<!-- ``` -->
+
+<!-- ### Plot top features with effect sizes -->
+
+<!-- ```{r, fig.width=10} -->
+
+<!-- # As annotation file has many duplicate gene -->
+
+<!-- # Lets split them and get only unique ones -->
+
+<!-- imp_cpgs_annot_long <- lapply(imp_cpgs_annot, function(x){ -->
+
+<!--   y <- x %>% separate_rows(UCSC_RefGene_Name) -->
+
+<!--   y[!duplicated(y$UCSC_RefGene_Name, incomparables = NA), ] # mapinfo & gene name -->
+
+<!-- })  -->
+
+<!-- View(imp_cpgs_annot_long$`Without NonCpGXY Probes`) -->
+
+<!-- importance_noncpgxy <- imp_cpgs_annot_long$`Without NonCpGXY Probes` -->
+
+<!-- # top 25  -->
+
+<!-- top_25_es <- rbind(head(importance_noncpgxy, 13), tail(importance_noncpgxy, 12)) -->
+
+<!-- View(top_25_es) -->
+
+<!-- # make annotation column -->
+
+<!-- top_25_es$annotation <- ifelse(is.na(top_25_es$UCSC_RefGene_Name), top_25_es$Feature, top_25_es$UCSC_RefGene_Name) -->
+
+<!-- # top_25_es$annotation <- ifelse(is.na(top_25_es$UCSC_RefGene_Name), top_25_es$Feature, paste0(top_25_es$Feature, ": ", top_25_es$UCSC_RefGene_Name)) -->
+
+<!-- top_25_es <- top_25_es %>% -->
+
+<!--   mutate(annotation = fct_reorder(annotation, Importance, .desc = F)) -->
+
+<!-- # create face - meaing for each label if it is plain or italic -->
+
+<!-- # childhood trauma and trauma should be plain -->
+
+<!-- # genes should be italic -->
+
+<!-- top_25_es <- top_25_es %>% -->
+
+<!--   mutate( face = case_when( -->
+
+<!--     grepl('Child|Trauma', levels(annotation)) ~ "plain", -->
+
+<!--     TRUE ~ "italic" -->
+
+<!--   )) -->
+
+<!-- top_25_es$Relation_to_UCSC_CpG_Island <- ifelse(top_25_es$Relation_to_UCSC_CpG_Island == '', NA, top_25_es$Relation_to_UCSC_CpG_Island) -->
+
+<!-- #%>% -->
+
+<!-- #mutate(face = factor(face, levels = c("plain", "italic"))) -->
+
+<!-- ``` -->
+
+<!-- ```{r, fig.width=9, fig.height=6.5} -->
+
+<!-- ptsd_genes <- read.xlsx("../data/Genes associated with disease.xlsx") -->
+
+<!-- View(ptsd_genes) -->
+
+<!-- ptsd_only <- ptsd_genes[grepl("PTSD", ptsd_genes$Disease_Role), ] -->
+
+<!-- top_25_es_wd_ptsd <- merge(top_25_es, ptsd_only, -->
+
+<!--                    by.x = 'annotation', by.y = "Gene", -->
+
+<!--                    all = T) -->
+
+<!-- top_25_es_wd_ptsd <- top_25_es_wd_ptsd[order(top_25_es_wd_ptsd$Importance, decreasing = T), ] -->
+
+<!-- plot_imp <- plot_bar(top_25_es_wd_ptsd,  -->
+
+<!--          x = "annotation", -->
+
+<!--          y = "Importance",  -->
+
+<!--          fill = "Disease_Role", -->
+
+<!--          xlab = "Features", -->
+
+<!--          ylab = "Weight (effect size)", -->
+
+<!--          title = "Top 25 features", -->
+
+<!--          leg_title = 'Gene associated with:', -->
+
+<!--          italic = TRUE, -->
+
+<!--          face = top_25_es$face) -->
+
+<!-- plot_imp -->
+
+<!-- ``` -->
+
+<!-- ### Top features with annotation for PTSD and others -->
+
+<!-- ```{r, fig.width=10 } -->
+
+<!-- ptsd_genes <- read.xlsx("../data/Genes associated with disease.xlsx") -->
+
+<!-- View(ptsd_genes) -->
+
+<!-- top_25_es_all <- merge(top_25_es, ptsd_genes, -->
+
+<!--                    by.x = 'annotation', by.y = "Gene", -->
+
+<!--                    all = T) -->
+
+<!-- top_25_es_all <- top_25_es_all[order(top_25_es$Importance, decreasing = T), ] -->
+
+<!-- plot_imp <- plot_bar(top_25_es_all,  -->
+
+<!--          x = "annotation", -->
+
+<!--          y = "Importance",  -->
+
+<!--          fill = "Disease_Role", -->
+
+<!--          xlab = "Features", -->
+
+<!--          ylab = "Weight (effect size)", -->
+
+<!--          title = "Top 25 features", -->
+
+<!--          leg_title = 'Involved in:', -->
+
+<!--          italic = TRUE, -->
+
+<!--          face = top_25_es$face) -->
+
+<!-- plot_imp -->
+
+<!-- ``` -->
+
+<!-- ```{r, fig.width=10} -->
+
+<!-- # Top and location based on CpG island -->
+
+<!-- plot_imp <- plot_bar(top_25_es,  -->
+
+<!--          x = "annotation", -->
+
+<!--          y = "Importance",  -->
+
+<!--          fill = "Relation_to_UCSC_CpG_Island", -->
+
+<!--          xlab = "Features", -->
+
+<!--          ylab = "Weight (effect size)", -->
+
+<!--          title = "Top 25 features", -->
+
+<!--          leg_title = 'Location', -->
+
+<!--          italic = TRUE, -->
+
+<!--          face = top_25_es$face) -->
+
+<!-- plot_imp -->
+
+<!-- ``` -->
+
+<!-- ### Pathways for negative and positive coefficient features separately -->
+
+<!-- ```{r} -->
+
+<!-- top_nonCpG_neg <- get_pathways(df = adj_sc_df_neg$`Without NonCpG Probes`) -->
+
+<!-- top_nonCpG_neg -->
+
+<!-- top_nonCpGXY_neg <- get_pathways(df = adj_sc_df_neg$`Without NonCpGXY Probes`) -->
+
+<!-- top_nonCpGXY_neg -->
+
+<!-- top_nonCpG_pos <- get_pathways(df = adj_sc_df_pos$`Without NonCpG Probes`) -->
+
+<!-- top_nonCpG_pos -->
+
+<!-- top_nonCpGXY_pos <- get_pathways(df = adj_sc_df_pos$`Without NonCpGXY Probes`) -->
+
+<!-- top_nonCpGXY_pos -->
+
+<!-- ``` -->
+
+<!-- ### Check how many cpgs are on X/Y chromosomes -->
+
+<!-- ```{r} -->
+
+<!-- dim(annot_file) -->
+
+<!-- # get the important cpgs from `Without NonCpG Probes` -->
+
+<!-- imp_cpgs <- annot_file[which(annot_file$IlmnID %in% colnames(adj_sc_df$`Without NonCpG Probes`)), ] -->
+
+<!-- dim(imp_cpgs) -->
+
+<!-- table(imp_cpgs$IlmnID %in% colnames(adj_sc_df$`Without NonCpG Probes`)) -->
+
+<!-- # get X/Y chromosome CpGs -->
+
+<!-- xy_cpgs <- imp_cpgs %>% filter(CHR == 'X' | CHR == 'Y') -->
+
+<!-- dim(xy_cpgs) -->
+
+<!-- xy_cpgs <- xy_cpgs %>% dplyr::select(IlmnID, MAPINFO, UCSC_RefGene_Name, CHR) -->
+
+<!-- # merge to get feature importance -->
+
+<!-- xy_cpgs <- merge(xy_cpgs, weights$`Without NonCpG Probes`, by = 1) -->
+
+<!-- dim(xy_cpgs) -->
+
+<!-- View(xy_cpgs) -->
+
+<!-- # write.csv(xy_cpgs, file = "../data/XY_chromosome_CpGs_in_important_features_selected_wd_EN.csv", -->
+
+<!-- #           row.names = F) -->
+
+<!-- ``` -->
+
+<!-- ### Check common features between two datasets -->
+
+<!-- ```{r} -->
+
+<!-- comn <- table(adj_sc_df$`Without NonCpG Probes` %in% adj_sc_df$`Without NonCpGXY Probes`) -->
+
+<!-- comn -->
+
+<!-- not_comn <- which(adj_sc_df$`Without NonCpG Probes` %in% adj_sc_df$`Without NonCpGXY Probes`) -->
+
+<!-- # not_comn -->
+
+<!-- ``` -->
+
+<!-- ### Now lets check how many CpGs (important features) are in the significant hits (Seyma) in meta-analysis for PTSD -->
+
+<!-- ```{r} -->
+
+<!-- p <- "../../../SignificantHits_Seyma/" -->
+
+<!-- f_ls <- list.files(p, pattern = ".csv") -->
+
+<!-- sig_hits <- lapply(f_ls, function(x) read.csv(paste0(p, x))) -->
+
+<!-- f_names <- tools::file_path_sans_ext(f_ls) -->
+
+<!-- names(sig_hits) <- f_names -->
+
+<!-- lapply(sig_hits, dim) -->
+
+<!-- # get significant hits from dfs -->
+
+<!-- sig_hits_imp_fea <- lapply(seq_along(sig_hits), function(i){ # loop over sig hits dfs -->
+
+<!--   x <- lapply(adj_sc_df, function(y){ # loop over non-cpgs and non-cpgsxy dfs -->
+
+<!--     d <- sig_hits[[i]] -->
+
+<!--     s <- d[which(d$IlmnID %in% colnames(y)), ] -->
+
+<!--   }) -->
+
+<!--   names(x) <- sheet_names -->
+
+<!--   x -->
+
+<!-- }) -->
+
+<!-- names(sig_hits_imp_fea) <- f_names -->
+
+<!-- print("Overlap between multi-hypo corrected sig hits and important features") -->
+
+<!-- lapply(sig_hits_imp_fea$MainResults_IVW_EpigenomeSig, dim) -->
+
+<!-- print("Overlap between nominally sig hits and important features") -->
+
+<!-- lapply(sig_hits_imp_fea$MainResults_IVW_nominalSig, dim) -->
+
+<!-- ``` -->
+
+<!-- ### Now get these overlapped significant hits including two phenotype vars to check prediction power -->
+
+<!-- ```{r} -->
+
+<!-- add_cols <- cols[1:2] # we need traumanum and childmt -->
+
+<!-- # get the overlapping cpgs plus trauma num and childmt to calculate risk score -->
+
+<!-- adj_sc_df_ovlp <- lapply(seq_along(adj_sc_df), function(i){ -->
+
+<!--   x <- adj_sc_df[[i]] -->
+
+<!--   y <- sig_hits_imp_fea$MainResults_IVW_nominalSig[[i]] -->
+
+<!--   x_sub <- x[, which(colnames(x) %in% y$IlmnID)] -->
+
+<!--   x <- cbind(x_sub, x[, add_cols]) -->
+
+<!-- }) -->
+
+<!-- lapply(adj_sc_df_ovlp, dim) -->
+
+<!-- weights_ovlp <- lapply(seq_along(adj_sc_df_ovlp), function(i){ -->
+
+<!--   x <- adj_sc_df_ovlp[[i]] -->
+
+<!--   y <- weights[[i]] -->
+
+<!--   y[which(y$Feature %in% colnames(x)), ] -->
+
+<!-- }) -->
+
+<!-- lapply(weights_ovlp, dim) -->
+
+<!-- Map(function(x,y) table(colnames(x) == y$Feature), adj_sc_df_ovlp, weights_ovlp) -->
+
+<!-- adj_sc_df_ovlp <- calculate_score(adj_sc_df_ovlp, weights_ovlp, -->
+
+<!--                              adj_df$`Without NonCpG Probes`, -->
+
+<!--                              add_col = 'CurrentPTSD') -->
+
+<!-- lmr_ovlp <- lm_helper(df = adj_sc_df_ovlp, f = f_cur_ptsd) -->
+
+<!-- lmr_ovlp -->
+
+<!-- ``` -->
+
+<!-- ### Lets check the previously found significant hits -->
+
+<!-- ```{r} -->
+
+<!-- prev_cpgs <- read.xlsx("../data/CpGs previosly found PGC.xlsx") -->
+
+<!-- dim(prev_cpgs) -->
+
+<!-- View(prev_cpgs) -->
+
+<!-- prev_cpgs_ovlp <- lapply(adj_sc_df, function(x){ -->
+
+<!--   prev_cpgs[which(prev_cpgs$CPG %in% colnames(x)), ] -->
+
+<!-- }) -->
+
+<!-- lapply(prev_cpgs_ovlp, dim) -->
+
+<!-- ``` -->
+
+<!-- ### How many GRRN genes are on the list -->
+
+<!-- ```{r} -->
+
+<!-- grrn <- read.csv("../data/GRRN_unique_annot_ACB.csv") -->
+
+<!-- grrn <- grrn[!grrn$Gene == "", ] -->
+
+<!-- dim(grrn) -->
+
+<!-- grrn_ovlp <- lapply(imp_cpgs_annot_long, function(x){ -->
+
+<!--   merge(x, grrn, by.x = 'UCSC_RefGene_Name', by.y = 'Gene') -->
+
+<!-- }) -->
+
+<!-- lapply(grrn_ovlp, dim) -->
+
+<!-- print(grrn_ovlp) -->
+
+<!-- ``` -->

@@ -1,0 +1,757 @@
+---
+title: "Downstream analysis"
+author: "Agaz Wani"
+date: "10/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+ # ⌘+⌥+I / Ctrl+Alt+I splits a code chunk.
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Code to do enrichment analysis
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+library(missMethyl)
+library(ggplot2)
+library(ggsignif)
+library(dplyr)
+library(tidyr)
+library(corrplot)
+library(cowplot)
+```
+
+
+### risk scores on test set
+```{r}
+# 2021-10-02_23-12-43 previous path
+adj_df <- read.csv("G:/PGC ML/Combined Data/2021-11-27_19-16-35//risk scores ptsdpm test data.csv")
+
+adj_df <- adj_df %>% dplyr::rename(CurrentPTSD = ptsdpm, 
+                            TraumaNumber = Traumanum,
+                            ChildhoodMaltreatment = Childhood_Mt)
+adj_df$CurrentPTSD <- as.factor(adj_df$CurrentPTSD)
+```
+
+
+### To scale data remove the risk scores and ptsd
+```{r}
+test_sc <- adj_df[, -which(names(adj_df) %in% (c("risk_score", "CurrentPTSD")))]
+dim(test_sc)
+
+```
+
+
+### Lifetime 
+```{r}
+lifetime <- read.csv("G:/PGC ML/Combined Data/2021-10-02_23-12-43/Important_features_ptsdlife_adjusted.csv")
+```
+
+
+### function to scale the data betweem 0-1
+```{r}
+maxmin <- function(x, na.rm=TRUE){
+  if(is.vector(x)==TRUE){
+    maxs <- max(x, na.rm = na.rm)
+    mins <- min(x, na.rm = na.rm)
+    scale(x,center=mins,scale=maxs-mins)
+  } else {
+    maxs <- apply(x, 2,max)
+    mins <- apply(x, 2,min)
+    scale(x, center = mins, scale = maxs - mins)
+  }
+}
+
+
+```
+
+
+### We will scale trauma and childhoodmaltreatment columns
+```{r}
+scale_cols <- c("TraumaNumber", "ChildhoodMaltreatment")
+scale_df <- test_sc[, which(names(test_sc) %in% (scale_cols))]
+scale_df <- data.frame(maxmin(x = scale_df, na.rm = T))
+
+other_df <- test_sc[, -which(names(test_sc) %in% (scale_cols))]
+
+adj_sc_df <- cbind(other_df, scale_df)
+
+```
+
+
+### Now calculate risk scores
+```{r}
+weights <- read.csv("G:/PGC ML/Combined Data/2021-11-27_19-16-35/Important_features.csv")
+
+weights$Feature <- ifelse(weights$Feature == 'Traumanum', 'TraumaNumber',
+                          ifelse(weights$Feature == 'Childhood_Mt',
+                                 'ChildhoodMaltreatment', weights$Feature))
+
+
+table(colnames(adj_sc_df) == weights$Feature)
+
+risk_score <- apply(adj_sc_df, 1, function(x) sum(x * weights$Importance))
+
+adj_sc_df$CurrentPTSD <- adj_df$CurrentPTSD
+
+```
+
+
+### Get beta-estimates
+```{r}
+b_estimates = list()
+
+for (i in 1:300){
+ x <- colnames(adj_sc_df)[i]
+ f <- paste0(x, '~', 'CurrentPTSD')
+ es <- lm(f, data = adj_sc_df)
+ summary(es)
+ b_estimates[[length(b_estimates) +1 ]] <- es$coefficients[2]
+}
+
+names(b_estimates) <- weights$Feature
+
+# add beta-estimates to the df
+weights$beta_est <- unlist(unname(b_estimates))
+
+```
+
+### Add the calculated risk scores to df
+```{r}
+adj_sc_df$risk_score_imp_beta <-  apply(adj_sc_df[, -301], 1, function(x) sum(x * weights$Importance*weights$beta_est))
+
+adj_sc_df$risk_score <- risk_score
+
+```
+
+
+
+
+
+### calculate mean methylation of samples for significant cpgs
+```{r}
+p <- c("^cg", "^ch")
+
+adj_df <- adj_df %>%
+  mutate(mean_meth = rowMeans(select(., starts_with(c('cg','ch.')))))
+
+adj_sc_df <- adj_sc_df %>%
+  mutate(mean_meth = rowMeans(select(., starts_with(c('cg','ch.')))))
+
+
+```
+
+
+
+### Correlation plot
+```{r, fig.width=12, fig.height=6}
+cols <- c("Gender", "TraumaNumber", "ChildhoodMaltreatment",
+          "risk_score_imp_beta", "risk_score", "CurrentPTSD", 
+          "mean_meth")
+
+new_names <- c("Gender", "Cumulative trauma", "Childhood maltreatment", 
+              "Risk score ES",  "Risk score", "Current PTSD", 
+              "Mean methylation")
+
+# # train
+# # adj_sc_df <- adj_sc_df %>% select(cols)
+# # adj_sc_df$ptsdpm <- as.numeric(adj_sc_df$ptsdpm)
+# # colnames(adj_sc_df) <- new_names
+# # cor_vec <- cor(adj_sc_df)
+# # 
+# # trainRes = cor.mtest(df_cor, conf.level = 0.95)
+# # 
+# # matrix(p.adjust(as.vector(as.matrix(trainRes$p)), method='fdr'),
+# #        ncol=6)
+# # 
+# # # test ------------------
+# # df_cor <- adj_df %>% select(cols)
+# # df_cor$ptsdpm <- as.numeric(df_cor$ptsdpm)
+# # 
+# # colnames(df_cor) <- new_names
+# # 
+# # cor_vec <- cor(df_cor)
+# # cor_vec
+# 
+# colrs <- colorRampPalette(c("#0072B5FF", '#7F0000',
+#            '#FF7F00', 'orange',
+#            'cyan', '#007FFF', 'blue', '#00007F',
+#            "#BC3C29FF"))
+# #pvalue
+# testRes = cor.mtest(df_cor, conf.level = 0.95)
+# 
+# matrix(p.adjust(as.vector(as.matrix(testRes$p)), method='fdr'),
+#        ncol=6, )
+# 
+# 
+# p_train <- corrplot(cor_vec_train,p.mat = trainRes$p, diag = TRUE, method = "pie",
+#               type = "upper",  number.cex = 0.8,
+#               tl.col = "black", tl.srt = 45,
+#               tl.cex = 1.7, cl.cex = 1.5,
+#               sig.level = c(0.001, 0.01, 0.05), 
+#               pch.cex = 1.5,insig = 'label_sig',
+#               cl.ratio = 0.4,
+#               col = colrs(10),
+#               title = "Training data")
+# 
+# p_test <- corrplot(cor_vec,p.mat = testRes$p, diag = TRUE, method = "pie",
+#               type = "upper",  number.cex = 0.8,
+#               tl.col = "black", tl.srt = 45,
+#               tl.cex = 1.7, cl.cex = 1.5,
+#               sig.level = c(0.001, 0.01, 0.05), 
+#               pch.cex = 1.5,insig = 'label_sig',
+#               cl.ratio = 0.4,
+#               col = colrs(10),
+#               title = "Test data")
+# 
+# cor(adj_df$risk_score, as.numeric(adj_df$ptsdpm))
+# 
+# cowplot::plot_grid(plot(p_train), plot(p_test))
+
+```
+
+## Function to get correlation and adjusted pvalue. Input is data frame, columns we want to get correlation for and new names to assign for columns. 
+```{r}
+get_correlation <- function(df, cols, new_names){
+  df <- df %>% select(cols)
+  indx <- sapply(df, is.factor)
+  df[indx] <- lapply(df[indx], function(x) as.numeric(as.character(x)))
+  colnames(df) <- new_names
+  cor_df <- cor(df)
+  p = cor.mtest(df, conf.level = 0.95)
+
+  # adjusted pvalues
+  p_adj <- matrix(p.adjust(as.vector(as.matrix(p$p)),
+                           method='fdr'),
+                  ncol=ncol(cor_df))
+  rownames(p_adj) <- new_names
+  colnames(p_adj) <- new_names
+
+  df_ls <- list(cor_df, p_adj)
+  names(df_ls) <- c("cor", "padj")
+  return(df_ls)
+}
+
+# color palette
+colrs <- colorRampPalette(c("#0072B5FF", '#7F0000',
+                            '#FF7F00', 'orange',
+                            'cyan', '#007FFF', 'blue', '#00007F',
+                            "#BC3C29FF"))
+```
+
+
+## Now call the function to get correlation for unadjusted data
+```{r, fig.width=8, fig.height=5}
+# covariate adjusted data
+# cor_adj_df <- get_correlation(df = adj_df, cols = cols,
+#                                 new_names = new_names)
+
+# covariate adjusted and scaled (phenotypes)data
+cor_scaled_df <- get_correlation(df = adj_sc_df, cols = cols,
+                                new_names = new_names)
+
+
+
+# p_adj <-  corrplot(cor_adj_df$cor,p.mat = cor_adj_df$padj,
+#          diag = TRUE, method = "pie",
+#          type = "upper",  number.cex = 0.8,
+#          tl.col = "black", tl.srt = 45,
+#          tl.cex = 1.5, cl.cex = 1.5,
+#          sig.level = c(0.001, 0.01, 0.05),
+#          pch.cex = 1.5,insig = 'label_sig',
+#          cl.ratio = 0.4,
+#          col = colrs(10),
+#          title = "")
+
+# grid.echo()
+# p_unadj <- grid.grab()
+
+
+
+
+p_adj_sc <- corrplot(cor_scaled_df$cor,p.mat = cor_scaled_df$padj,
+                  diag = TRUE, method = "pie",
+                  type = "upper",  number.cex = 0.8,
+                  tl.col = "black", tl.srt = 45,
+                  tl.cex = 1.5, cl.cex = 1.5,
+                  sig.level = c(0.001, 0.01, 0.05),
+                  pch.cex = 1.5,insig = 'label_sig',
+                  cl.ratio = 0.4,
+                  col = colrs(10),
+                  title = "Covariate adjusted and scaled")
+
+# grid.echo()
+# p_adj <- grid.grab()
+
+# plot_grid(p_unadj, NULL, p_adj, rel_widths = c(1,-0.1,1),
+#           labels = c('A', '', 'B'), align = "hv", nrow = 1)
+
+```
+
+### Theme and linear model plot function
+
+```{r}
+# theme setting
+th <-   theme(plot.title = element_text(size = 20, hjust = 0.5),
+              axis.title = element_text(size =18),
+              axis.text = element_text(size = 16),
+              legend.title = element_text( size = 16),
+              legend.text = element_text(size = 14))
+
+
+# function to plot with lm line
+lm_plot <- function(df, x, y, xlab, ylab, title, group='ptsdpm',
+                    model = 'full', legend='', fig_legend = TRUE){
+  if (model == 'full'){
+    p <- ggplot(df,aes_string(x, y)) +
+      geom_point( color="blue", size = 3) +
+      geom_smooth(method='lm', linetype="dashed",
+                  color="darkred", fill="blue", size = 1.5)
+  }else{
+    p <- ggplot(df,aes_string(x, y, color = group)) +
+      geom_point( size = 3) 
+    
+    if(fig_legend){
+      print("=================")
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+    }else{
+      p <- p + scale_color_manual(legend,
+                         values = c("0" = "#0072B5FF", "1" = "#BC3C29FF"))+
+        theme(legend.position = 'none')+
+        geom_smooth(aes(group = group, color=group),
+                  method='lm', linetype="solid",
+                  size = 1.5) #color="blue", fill="blue",
+      
+    }
+
+
+  }
+
+  p <- p + ggtitle(title)+
+    xlab(xlab) +
+    ylab(ylab) +
+    theme_classic()+
+    th
+}
+
+
+```
+
+# linear model
+```{r}
+
+sink("G:/PGC ML/Combined Data/2021-10-02_23-12-43/Linear model PTSD summary.txt")
+
+# current PTSD
+lmr_adj <- lm(risk_score_imp_beta~CurrentPTSD, data = adj_sc_df) 
+summary(lmr_adj)
+
+lmr_scaled <- lm(risk_score~CurrentPTSD, data = adj_sc_df)
+summary(lmr_scaled)
+
+
+# lifetime PTSD
+# lmr_unadj_l <- lm(risk_score~LifetimePTSD, data = unadj_df)
+# summary(lmr_unadj_l)
+
+
+# lmr_adj_l <- lm(risk_score~LifetimePTSD, data = adj_df)
+# summary(lmr_adj_l)
+
+# risk scores vs mean methylation
+lmr_meth <- lm(mean_meth~risk_score_imp_beta, data = adj_sc_df)
+summary(lmr_meth)
+
+lmr_meth_sc <- lm(mean_meth~risk_score, data = adj_sc_df)
+summary(lmr_meth_sc)
+
+
+# cumulative trauma vs mean methylation
+# lmr_ct_meth <- lm(mean_meth~TraumaNumber, data = adj_df)
+# summary(lmr_ct_meth)
+
+lmr_ct_meth_sc <- lm(mean_meth~TraumaNumber, data = adj_sc_df)
+summary(lmr_ct_meth_sc)
+
+
+# childhood maltreatment vs mean methylation
+# lmr_chd_meth <- lm(mean_meth~ChildhoodMaltreatment, data = adj_df)
+# summary(lmr_chd_meth)
+
+
+lmr_chd_meth_sc <- lm(mean_meth~ChildhoodMaltreatment, data = adj_sc_df)
+summary(lmr_chd_meth_sc)
+
+sink()
+
+```
+
+### Separate cases and controls
+```{r}
+cases <- adj_df %>% filter(CurrentPTSD == 1)
+message("cases:")
+dim(cases)
+
+controls <- adj_df %>% filter(CurrentPTSD == 0)
+message("controls:") 
+dim(controls)
+
+```
+
+# lm for mean methylation and risk scores
+```{r, fig.width=11, fig.height=4}
+
+p_meth_sep <- lm_plot(df = adj_sc_df, x = 'risk_score_imp_beta',
+                      y = 'mean_meth',
+                      xlab = "Risk score",
+                      ylab = "Mean methylation",
+                      model = 'seperate',
+                      group = "CurrentPTSD", 
+                      legend = '',
+                      title = "Covariate adjusted and scaled\n with beta",
+                      fig_legend = FALSE
+                      )
+# p_meth_sep
+
+
+# p_meth_sep_l <- lm_plot(df = adj_df, x = 'risk_score',
+#                       y = 'mean_meth',
+#                       xlab = "Risk score",
+#                       ylab = "Mean methylation",
+#                       model = 'seperate',
+#                       group = "LifetimePTSD",
+#                       legend  = "Lifetime PTSD",
+#                       title = "Covariate unadjusted")
+# p_meth_sep_l
+
+
+
+p_meth_adj_sep <- lm_plot(df = adj_sc_df, x = 'risk_score',
+                          y = 'mean_meth',
+                          xlab = "Risk score",
+                          ylab = "",
+                          model = 'seperate',
+                          group = "CurrentPTSD",
+                          legend = 'Current PTSD',
+                          title = "Covariate adjusted and scaled")
+
+# p_meth_adj_sep
+
+
+# p_meth_adj_sep_l <- lm_plot(df = adj_df, x = 'risk_score',
+#                           y = 'mean_meth',
+#                           xlab = "Risk score",
+#                           ylab = "",
+#                           model = 'seperate',
+#                           group = "LifetimePTSD",
+#                           legend  = "Lifetime PTSD",
+#                           title = "Covariate adjusted")
+
+# p_meth_adj_sep_l
+plot_grid(p_meth_sep, p_meth_adj_sep,
+           labels = 'AUTO'
+          )
+
+# plot_grid(p_meth_sep, p_meth_adj_sep, 
+#           p_meth_sep_l, p_meth_adj_sep_l, labels = 'AUTO'
+#           )
+
+```
+
+
+```{r, fig.width=11, fig.height=4}
+# # lm for risk score vs cumulative trauma
+# case_model_ct <- lm(risk_score~Traumanum, data = cases)
+# coef_case_ct <- coef(case_model_ct); coef_case_ct
+# 
+# control_model_ct <- lm(risk_score~Traumanum, data = controls)
+# coef_control_ct <- coef(control_model_ct); coef_control_ct
+# 
+# 
+# 
+# lmr_ct <- lm(risk_score~Traumanum, data = adj_df)
+# summary(lmr_ct)
+# p_ct <- lm_plot(df = adj_df, x = 'Traumanum',
+#                 y = 'risk_score', xlab = "Cumulative trauma",
+#                 ylab = 'Risk score')
+# # p_ct
+# 
+# 
+# p_ct_sep <- lm_plot(df = adj_df, x = 'Traumanum',
+#                 y = 'risk_score', xlab = "Cumulative trauma",
+#                 ylab = 'Risk score', model = 'seperate')
+# # p_ct_sep
+# 
+# cowplot::plot_grid(p_ct,NULL, p_ct_sep,
+#                    nrow = 1,
+#                    rel_widths = c(1,0.05, 1.5),
+#                    labels = c("A", "", "B"))
+
+```
+
+# Cumulative trauma
+
+```{r, fig.width=11, fig.height=4}
+
+p_ct_meth_sep <- lm_plot(df = adj_df, x = 'TraumaNumber',
+                         y = 'mean_meth', xlab = "Cumulative trauma",
+                         ylab = 'Mean methylation',
+                         model = 'seperate',
+                         group = "CurrentPTSD",
+                         legend = "Current PTSD",
+                         title = "Covariate adjusted"
+)
+# p_ct_meth_sep
+
+
+# p_ct_meth_sep_l <- lm_plot(df = unadj_df, x = 'TraumaNumber',
+#                          y = 'mean_meth', xlab = "",
+#                          ylab = 'Mean methylation',
+#                          model = 'seperate',
+#                          group = "LifetimePTSD",
+#                          legend = "Lifetime PTSD",
+#                          title = "Covariate unadjusted"
+#                          )
+# # p_ct_meth_sep_l
+
+p_ct_meth_sep_adj <- lm_plot(df = adj_sc_df, x = 'TraumaNumber',
+                         y = 'mean_meth', xlab = "Cumulative trauma",
+                         ylab = '',
+                         model = 'seperate',
+                         group = "CurrentPTSD",
+                         legend = "Current PTSD",
+                         title = "Covariate adjusted and scaled"
+)
+# p_ct_meth_sep_adj
+
+
+# p_ct_meth_sep_adj_l <- lm_plot(df = adj_df, x = 'TraumaNumber',
+#                            y = 'mean_meth', xlab = "Cumulative trauma",
+#                            ylab = '',
+#                            model = 'seperate',
+#                            group = "LifetimePTSD",
+#                            legend = "Lifetime PTSD",
+#                            title = "Covariate adjusted"
+# )
+# # p_ct_meth_sep_adj_l
+
+plot_grid(p_ct_meth_sep, p_ct_meth_sep_adj,
+           labels = 'AUTO'
+          )
+# plot_grid(p_ct_meth_sep, p_ct_meth_sep_adj, 
+#           p_ct_meth_sep_l, p_ct_meth_sep_adj_l, labels = 'AUTO'
+#           )
+
+```
+
+
+```{r, fig.width=11, fig.height=4}
+# childhood trauma and mean methylation
+lmr_cht_meth <- lm(mean_meth~Childhood_Mt, data = adj_df)
+summary(lmr_cht_meth)
+
+p_cht_meth <- lm_plot(df = adj_df, x = 'Childhood_Mt',
+                y = 'mean_meth', xlab = "Childhood maltreatment",
+                ylab = 'Mean methylation')
+# p_cht_meth
+
+
+p_cht_meth_sep <- lm_plot(df = adj_df, x = 'Childhood_Mt',
+                y = 'mean_meth', xlab = "Childhood maltreatment",
+                ylab = '', model = 'seperate')
+# p_cht_meth_sep
+
+cowplot::plot_grid(p_cht_meth,NULL, p_cht_meth_sep,
+                   nrow = 1,
+                   rel_widths = c(1,0.05, 1.5),
+                   labels = c("A", "", "B"))
+
+```
+
+
+```{r}
+
+```
+
+
+### Density plot function
+
+```{r}
+make_densityplot <- function(df, x, y, xlab, ylab, fig_legend = TRUE,
+                             title = ''){
+  
+  p <- ggplot(data=df, aes_string(x=x, group=y, fill=y)) +
+    geom_density(adjust=1.5, alpha=.8) +
+    theme_classic()
+  
+  if(fig_legend){
+    p <- p + scale_fill_manual("Current PTSD",
+                      values  = c("#0072B5FF", "#BC3C29FF"))
+  }else{
+    p <- p + scale_fill_manual("Current PTSD",
+                      values  = c("#0072B5FF", "#BC3C29FF")) +
+      theme(legend.position = 'none')
+  }
+
+  p <- p + ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)+ th
+}
+```
+
+
+```{r, fig.width=10, fig.height=5}
+
+# for risk scores
+p1_d <- make_densityplot(df = adj_sc_df, x = 'risk_score_imp_beta',
+                         y = 'CurrentPTSD',
+                         xlab = 'Risk score',
+                         ylab = "Density",
+                         fig_legend = FALSE,
+                         title = "Covariate adjusted")
+# p1_d
+
+# for risk scores
+p1_sc_d <- make_densityplot(df = adj_sc_df, x = 'risk_score',
+                         y = 'CurrentPTSD',
+                         xlab = 'Risk score',
+                         ylab = "",
+                         title = "Covariate adjusted and scaled")
+# p1_sc_d
+
+
+
+# for mean methylation
+# p2_d <- make_densityplot(df = adj_df, x = 'mean_meth',
+#                          y = 'CurrentPTSD',
+#                          xlab = 'Mean metylation',
+#                          ylab = "Density",
+#                          fig_legend = FALSE)
+# p2_d
+
+
+cowplot::plot_grid(p1_d, p1_sc_d, rel_widths = c(1.3, 2),
+                   labels = 'AUTO')
+
+
+
+```
+
+
+## Box plot function
+```{r}
+make_boxplot <- function(df, x, y, xlab, ylab,
+                         test_pval, y_pos, title = ""){
+  p <- df %>%
+    ggplot(aes_string(x = x, y = y, fill = x)) +
+    geom_boxplot(lwd = 1) +
+    scale_fill_manual(values = c("#0072B5FF", "#BC3C29FF")) +
+    geom_jitter(size=1.7, alpha=0.9) +
+    theme_classic()+
+    theme(legend.position="none") + th +
+
+    ggtitle(title) +
+    xlab(xlab) +
+    ylab(ylab)
+
+  # add significance
+  p + geom_signif(
+    annotation = formatC(test_pval, digits = 2),
+    y_position = y_pos , xmin = 1, xmax = 2, size = 1,
+    textsize = 5, tip_length = c(0.15, 0.02))
+}
+
+```
+
+
+# ---------------------------------------------
+```{r, fig.width=12, fig.height=4}
+# wilcoxon test for difference is risk score between groups
+wcox_test <- wilcox.test(as.numeric(adj_sc_df$CurrentPTSD),
+                         adj_sc_df$risk_score_imp_beta)
+wcox_test
+wcox_test$p.value
+
+p1_box <- make_boxplot(df = adj_sc_df, x = 'CurrentPTSD',
+                       y = 'risk_score_imp_beta',
+                       xlab = 'Current PTSD',
+                       ylab = 'Risk score',
+                       test_pval = wcox_test$p.value,
+                       y_pos = 5, 
+                       title = "Covariate adjusted"
+                       )
+p1_box
+
+
+wcox_test_sc <- wilcox.test(as.numeric(adj_sc_df$CurrentPTSD),
+                         adj_sc_df$risk_score)
+wcox_test_sc
+wcox_test_sc$p.value
+
+p1_box_sc <- make_boxplot(df = adj_sc_df, x = 'CurrentPTSD',
+                       y = 'risk_score',
+                       xlab = 'Current PTSD',
+                       ylab = 'Risk score',
+                       test_pval = wcox_test_sc$p.value,
+                       y_pos = .54,
+                       title = "Covariate adjusted \nand scaled"
+                       )
+p1_box_sc
+
+
+# --------------------------
+wcox_test_meth <- wilcox.test(as.numeric(adj_df$CurrentPTSD),
+                              adj_df$mean_meth)
+wcox_test_meth
+wcox_test_meth$p.value
+# Plot risk scores for ptsd
+
+
+p2_box <- make_boxplot(df = adj_df, x = 'CurrentPTSD',
+                       y = 'mean_meth',
+                       xlab = 'Current PTSD',
+                       ylab = 'Mean methylation',
+                       test_pval = wcox_test_meth$p.value,
+                       y_pos  = .54,
+                       title = "Covariate adjusted"
+                       )
+p2_box
+
+plot_grid(p1_box, p1_box_sc, p2_box, nrow = 1)
+
+```
+
+
+
+```{r}
+# get cpgs
+
+cpgs_df <- adj_df %>%
+  select(starts_with(c('cg','ch.')))
+dim(cpgs_df)
+head(cpgs_df[, 1:5])
+
+cpgs <- names(cpgs_df)
+
+
+# Check number of genes that significant adj_df are annotated to
+check <- getMappedEntrezIDs(sig.cpg = cpgs)
+
+length(check$sig.eg)
+
+
+library(IlluminaHumanMethylationEPICanno.ilm10b2.hg19)
+gst <- gometh(sig.cpg=cpgs, collection="GO",
+              plot.bias=TRUE)
+
+topGSA(gst)
+
+```
+
+

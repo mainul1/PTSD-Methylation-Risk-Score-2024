@@ -1,0 +1,346 @@
+---
+title: "Association Test"
+author: "Agaz Wani"
+date: "12/16/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Code to perform association test of important features with PTSD
+```{r, echo=FALSE, message=FALSE}
+library(ggpubr)
+library(feather)
+library(kableExtra)
+library(dplyr)
+library(readr)
+library(CpGassoc)
+library(tibble)
+library(clusterProfiler)
+library(DOSE)
+library(org.Hs.eg.db)
+library(openxlsx)
+library(tidyr)
+library(dplyr)
+library(data.table)
+library(arrow)
+```
+
+### Load variant function of cpg.assoc(). The option `memory.limit()` no longer works, so throws an error. `memory.limit()` is replaced with the actual amount of memory
+
+```{r}
+source("cpgassoc2.R")
+```
+
+
+### Load important features
+
+```{r}
+
+# function to read all sheets
+read_allsheets <- function(path){
+  sheet_nms <- getSheetNames(path)
+  sheets <- lapply(sheet_nms, read.xlsx, xlsxFile = path)
+  names(sheets) <- sheet_nms
+  return(sheets)
+}
+
+# load the important features that we saved after running
+# the ML models
+path = "G:/PGC ML/Combined Data/2022-03-30_15-07-11/"
+
+# Important features for current and lifetime PTSD datasets
+current <- read_allsheets(path = paste0(path,
+                                        "Current_ptsd_important_features.xlsx"))
+sheet_names <- names(current)
+lapply(current, dim)
+
+
+# Feature weights (Importance)
+file_ls <- list.files(path, pattern = ".csv")
+
+weights_file_ls <- file_ls[grepl("^Important_features_wo", file_ls)]
+
+weights <- lapply(weights_file_ls, function(x) read.csv(paste0(path, x)))
+names(weights) <- sheet_names
+lapply(weights, dim)
+
+
+# Pull out sample ids and CpGs only
+feature_dfs <- lapply(current, function(x) x[, which(grepl('Basename|^cg', colnames(x)))])
+lapply(feature_dfs, dim)
+feature_dfs_t <- lapply(feature_dfs, function(x){
+  y <- column_to_rownames(x, var = "Basename")
+  y <- t(y)
+})
+
+lapply(feature_dfs_t, function(x) head(x[, 1:5]))
+lapply(feature_dfs_t, dim)
+
+Map(function(x, y) table(x$Feature %in% colnames(y)), weights, feature_dfs)
+    
+# Now load annotation file
+annot_file <- fread("../../../../EWAS meta-analysis(Janelle)/data/infinium-methylationepic-v-1-0-b5-manifest-file.csv", 
+                    data.table = F, skip = 7, fill = T)
+
+dim(annot_file)
+
+annot_file_sub <- annot_file %>% dplyr::select(IlmnID, Infinium_Design_Type,
+                                        Genome_Build, CHR, MAPINFO, UCSC_RefGene_Name)
+
+
+annot_dfs <- lapply(weights, function(x){
+  y <- merge(x, annot_file_sub, by = 1)
+  # y[order(y$Importance, decreasing = T), ]
+  # annot_file[which(annot_file$IlmnID %in% x$Feature), ]
+})
+lapply(annot_dfs, dim)
+
+
+```
+#### Read the main methylation and phenotype information
+```{r}
+# To look at covariate unadjusted data
+beta <- arrow::read_feather("G:/PGC ML/Pre_Processed Data/2021-11-15_21-41-53/DNHS_GTP_MRS_ArmyS_Prismo_methylation.feather")
+
+beta <- as.data.frame(beta, stringsAsFactors = F)
+dim(beta)
+
+beta <- column_to_rownames(beta, var = "CpGs")
+
+
+# get the samples matching with train-test set
+beta <- beta[, which(colnames(beta) %in% current$`Without NonCpG Probes`$Basename) ]
+dim(beta)
+table(colnames(beta) == current$`Without NonCpG Probes`$Basename)
+
+# Now pull important features from beta
+beta <- lapply(feature_dfs_t, function(x) beta[which(rownames(beta) %in% rownames(x)), ])
+
+lapply(beta, dim)
+
+pheno <- read.csv("G:/PGC ML/Pre_Processed Data/2021-11-15_21-41-53/DNHS_GTP_MRS_ArmyS_Prismo_Pheno.csv")
+
+pheno <-  column_to_rownames(pheno, var = "Basename")
+dim(pheno)
+
+```
+
+### Get common samples and order
+```{r}
+cols <- c("Comp.2", "Comp.3", "Cd8T", "Cd4T", "Nk",  
+          "Bcell", "Mono",  "Gender", "Smos", "Age")
+indx <- complete.cases(pheno[, cols])
+pheno <- pheno[indx, ]
+
+order_samples <- function(beta_vals, pheno_info){
+  # rownames(beta_vals) <- NULL
+  # beta_vals <- column_to_rownames(beta_vals, var = "Basename")
+  cpg <- beta_vals[, colnames(beta_vals) %in% row.names(pheno_info)]
+  cpg <- cpg[, order(colnames(cpg))]
+  pheno_info <- pheno_info[rownames(pheno_info) %in% colnames(cpg), ]
+  pheno_info <- pheno_info[order(rownames(pheno_info)), ]
+  print(table(rownames(pheno_info) == colnames(cpg))) # should be TRUE
+  return(list(cpgs = cpg, pheno= pheno_info))
+}
+
+# Covariate adjusted
+beta_pheno <- lapply(feature_dfs_t, function(x) {
+  order_samples(beta_vals = x, pheno_info = pheno)
+})
+
+# Covariate unadjusted
+beta_unadj_pheno <- lapply(beta, function(x) {
+  order_samples(beta_vals = x, pheno_info = pheno)
+})
+
+```
+
+### Now get the cpgs from each data frame
+```{r}
+important_cpgs <- lapply(seq_along(beta_pheno), function(i){
+  cpgs <- beta_pheno[[i]]$cpg
+})
+names(important_cpgs) <- names(feature_dfs)
+lapply(important_cpgs, dim)
+```
+
+### Now order the cpgs and annotations that is needed for manhattan plot
+```{r}
+important_cpgs <- lapply(seq_along(important_cpgs), function(i) {
+  x <- important_cpgs[[i]]
+  x[order(match(rownames(x), annot_dfs[[i]]$Feature)), ]
+  })
+
+table(rownames(important_cpgs[[1]]) == annot_dfs[[1]]$Feature)
+table(rownames(important_cpgs[[2]]) == annot_dfs[[2]]$Feature)
+
+table(rownames(beta[[1]]) == annot_dfs[[1]]$Feature)
+table(rownames(beta[[2]]) == annot_dfs[[2]]$Feature)
+
+```
+
+
+
+```{r}
+## Define variables
+study <- "DNHS_GTP_MRS_PR_AS" # name of the study, e.g. "GTP", "DNHS" etc.
+ptsdVar <- "Ptsdpm" # name of the ptsd variable, coded as: cases = 1 and controls = 0
+ptsd <- lapply(seq_along(beta_pheno), function(i){
+  beta_pheno[[i]]$pheno[, ptsdVar, FALSE]
+})
+
+ptsd_unadj <- lapply(seq_along(beta_unadj_pheno), function(i){
+  beta_unadj_pheno[[i]]$pheno[, ptsdVar, FALSE]
+})
+
+## Define covariates to be adjusted for EWAS
+## Covariates to be included:
+##  - cell types from step 3 ("CD8T","CD4T","NK","Bcell","Mono")
+##  - GWAS PCs PC1 and PC2 (if available), if not mPC2 (Comp.2) and mPC3 (Comp.3) from step 3.1
+##  - age
+##  - sex (if applicable)
+covar <- lapply(seq_along(beta_pheno), function(i){
+  data.frame(beta_pheno[[i]]$pheno[, c("Comp.2","Comp.3","Cd8T","Cd4T","Nk","Bcell","Mono","Gender", "Smos","Age")])
+}) 
+lapply(covar, dim)
+
+covar_unadj <- lapply(seq_along(beta_unadj_pheno), function(i){
+  data.frame(beta_unadj_pheno[[i]]$pheno[, c("Comp.2","Comp.3","Cd8T","Cd4T","Nk","Bcell","Mono","Gender", "Smos","Age")])
+})
+
+lapply(covar_unadj, dim)
+```
+
+
+```{r}
+## Run EWAS with CpGAssoc
+
+cpg_assoc_test <- function(cpgs_df, pheno_df, covars_df = NULL){
+  test <- lapply(seq_along(cpgs_df), function(i){
+  x <- cpgs_df[[i]]
+  y <- pheno_df[[i]]
+  if(is.null(covars_df)){
+      test <- cpg.assoc2(x, y$pheno[, ptsdVar], covariates = NULL, 
+                    logit.transform = T, large.data = TRUE)
+      print(("Finished processing"))
+  }else{
+    message("Analyzing with covariates")
+    z <- covars_df[[i]]
+    test <- cpg.assoc2(x, y$pheno[, ptsdVar], z, 
+                    logit.transform = T, large.data=TRUE)
+  }
+
+  assoc <- test$results
+  eff <- test$coefficients
+  results <- cbind(assoc,eff)
+  results <- list(results, test)
+})
+}
+
+test_adj <- cpg_assoc_test(cpgs_df = important_cpgs,
+                           pheno_df = beta_pheno)
+names(test_adj) <- names(current)
+
+# test_adj$`Without NonCpG Probes`[[2]]
+```
+
+### Important CpGs at FDR < 0.05
+```{r}
+lapply(test_adj, function(x) sum(x[[1]]$FDR < 0.05))
+
+```
+
+### Run EWAS with CpGAssoc with adjusted data and covariates. Note: doubling the adjustment may not be interesting
+
+```{r}
+
+test_adj_covar <- cpg_assoc_test(cpgs_df = important_cpgs,
+                           pheno_df = beta_pheno,
+                           covars_df = covar)
+names(test_adj_covar) <- names(current)
+
+lapply(test_adj_covar, function(x) sum(x[[1]]$FDR < 0.05))
+
+```
+
+
+### Run EWAS with CpGAssoc with unadjusted data, but using covariates in the association test
+```{r}
+test_unadj_covar <- cpg_assoc_test(cpgs_df = beta,
+                           pheno_df = beta_unadj_pheno,
+                           covars_df = covar_unadj)
+names(test_unadj_covar) <- names(current)
+
+lapply(test_unadj_covar, function(x) sum(x[[1]]$FDR < 0.05))
+
+```
+
+#### Plots
+```{r}
+manhattan_plot <- function(result, annots, title = ''){
+  print(manhattan(result[[1]][[2]],
+          annots[[1]]$Feature,
+          annots[[1]]$CHR,
+          annots[[1]]$MAPINFO,
+          main.title = title,
+          eps.size = c(15, 5)))
+  
+}
+
+p_adj <- manhattan_plot(result = test_adj, annots = annot_dfs,
+                        title = "Current PTSD: Without NonCpG Probes")
+p_adj
+manhattan(test_adj[[1]][[2]],
+          annot_dfs[[1]]$Feature,
+          annot_dfs[[1]]$CHR,
+          annot_dfs[[1]]$MAPINFO,
+          main.title = "Current PTSD: Without NonCpG Probes (train_test)",
+          eps.size = c(15, 5))
+
+manhattan(test_adj[[2]][[2]],
+          annot_dfs[[2]]$Feature,
+          annot_dfs[[2]]$CHR,
+          annot_dfs[[2]]$MAPINFO,
+          main.title = "Current PTSD: Without NonCpGXY Probes (train-test)",
+          eps.size = c(15, 5))
+```
+
+
+### Test for covariate unadjusted data, but using covariates in the association test
+```{r}
+manhattan(test_unadj_covar[[1]][[2]],
+          annot_dfs[[1]]$Feature,
+          annot_dfs[[1]]$CHR,
+          annot_dfs[[1]]$MAPINFO,
+          main.title = "Current PTSD: Without NonCpG Probes \n unadjusted for covariates (train-test)",
+          eps.size = c(15, 5))
+
+manhattan(test_unadj_covar[[2]][[2]],
+          annot_dfs[[2]]$Feature,
+          annot_dfs[[2]]$CHR,
+          annot_dfs[[2]]$MAPINFO,
+          main.title = "Current PTSD: Without NonCpGXY Probes  \n unadjusted for covariates (train-test)",
+          eps.size = c(15, 5))
+```
+
+```{r}
+plot(test_adj[[1]][[2]], 
+tplot = FALSE, classic = TRUE, 
+main.title = "QQ plot:Without NonCpG Probes for \nbetween methylation and current PTSD (train-test)")
+
+plot(test_adj[[2]][[2]], 
+tplot = FALSE, classic = TRUE, 
+main.title = "QQ plot: Without NonCpGXY Probes \nbetween methylation and current PTSD (train-test)")
+
+plot(test_unadj_covar[[1]][[2]], 
+tplot = FALSE, classic = TRUE, 
+main.title = "QQ plot: Without NonCpG Probes  \nbetween methylation and current PTSD(train-test)")
+
+plot(test_unadj_covar[[2]][[2]], 
+tplot = FALSE, classic = TRUE, 
+main.title = "QQ plot: Without NonCpGXY Probes  \nbetween methylation and current PTSD(train-test)")
+```
