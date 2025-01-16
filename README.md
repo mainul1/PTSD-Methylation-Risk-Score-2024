@@ -1,4 +1,4 @@
-# PGCML
+# Methylation risk score PGCML
 Code in this repository is to pre-process data for machine learning and train models to predict PTSD and create a methylation risk score.
 
 ## Files:
