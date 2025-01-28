@@ -1,4 +1,4 @@
-# Methylation risk score PGCML
+# PTSD Methylation Risk Score 2024
 Code in this repository is to pre-process data for machine learning and train models to predict PTSD and create a methylation risk score.
 
 ## Files:
@@ -16,6 +16,12 @@ paper as we thought to make it an Epic data paper.
 9. `Compare_Effect_Sizes.Rmd` and `Compare_Effect_Sizes.html` code to compare the effect sizes of discovery and Boston VA cohort for model 1.
 10. `Demographics.R` code to get demographic information for the manuscript.
 11. `Cohort_Information.Rmd` and `Cohort_Information.html` code to get summary information from different cohorts, e.g., variables in each cohort to check data availability. 
+
+### Key Instruction: The weights and features for each of the three risk scores are located in the Data folder. The files are named as follows:
+
+eMRS_Model1.xlsx
+MoRS_Model2.xlsx
+MoRSAE_Model3.xlsx
 
 ### Python code to train and test models:
 1. `makedirectory.py` Is to make a directory to store the outcome files from each run.
