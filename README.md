@@ -19,9 +19,9 @@ paper as we thought to make it an Epic data paper.
 
 ### Key Instruction: The weights and features for each of the three risk scores are located in the Data folder. The files are named as follows:
 
-eMRS_Model1.xlsx
-MoRS_Model2.xlsx
-MoRSAE_Model3.xlsx
+1. `eMRS_Model1.xlsx
+2. `MoRS_Model2.xlsx
+3. `MoRSAE_Model3.xlsx
 
 ### Python code to train and test models:
 1. `makedirectory.py` Is to make a directory to store the outcome files from each run.
