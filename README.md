@@ -13,7 +13,7 @@ Code in this repository is to pre-process data for machine learning and train mo
 7. `cpgassoc2.R` helper function to perform association analysis between each CpG and PTSD.
 8. `Covariate_adjustment_1.R` example code to show covariate adjustment.
 paper as we thought to make it an Epic data paper.
-9. `Compare_Effect_Sizes.Rmd` and `Compare_Effect_Sizes.html` code to compare the effect sizes of discovery and Boston VA cohort for model 1.
+9. `Compare_Effect_Sizes.Rmd` and `Compare_Effect_Sizes.html` code to compare the effect sizes of discovery and Boston VA cohort for model1.
 10. `Demographics.R` code to get demographic information for the manuscript.
 11. `Cohort_Information.Rmd` and `Cohort_Information.html` code to get summary information from different cohorts, e.g., variables in each cohort to check data availability. 
 
