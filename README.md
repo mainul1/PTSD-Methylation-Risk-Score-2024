@@ -1,7 +1,7 @@
 # PTSD Methylation Risk Score 2024
 Code in this repository reflect the steps used to pre-process data for machine learning and train models to predict PTSD and create a methylation risk score. Also provided are the final weights and features for each of the three published risk scores.
 # Main Contributor
-Agaz Wani
+Agaz Wani [https://github.com/AgazW]
 ## Files:
 
 ### Key Instruction: The weights and features for each of the three published risk scores are located in the Data folder. The files are named as follows:
